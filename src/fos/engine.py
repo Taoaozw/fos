@@ -10,6 +10,13 @@ from typing import Any
 
 from fos.config import FosConfig, ProviderConfig
 from fos.errors import NotFoundError, UsageError
+from fos.freshness import (
+    check_source_freshness,
+    freshness_multiplier,
+    load_usage_stats,
+    record_recall_hits,
+    resolve_legacy_source_ref,
+)
 from fos.ledger import LedgerStore
 from fos.models import (
     KIND_PREFIX,
@@ -333,9 +340,9 @@ def query_snapshot_recall(
         docs = [(nid, node_embedding_text(valid_map[nid])) for nid in top_ids]
         rerank_scores = reranker.rerank(query, docs)
 
-    # Way 4: Temporal & Salience Weighting: severity * log(1 + seen_count) * recency
+    # Way 4: Temporal, Salience & Anti-Rot Freshness Weighting
     ref_time = parse_timestamp(as_of) if as_of else datetime.now(timezone.utc)
-    final_ranked: list[tuple[str, float]] = []
+    final_ranked: list[tuple[str, float, str]] = []
     max_rrf = max((rrf_scores[nid] for nid in top_ids), default=1.0) or 1.0
 
     for nid in top_ids:
@@ -345,27 +352,41 @@ def query_snapshot_recall(
         salience = severity_weight(node.severity) * (1.0 + math.log(1.0 + max(1, node.seen_count))) * recency_weight(node.valid_from, ref_time)
         # Scope boost for exact project match over 'global'
         scope_boost = 1.15 if (scope and node.scope == scope) else 1.0
-        combined = (0.55 * rr + 0.45 * norm_rrf) * salience * scope_boost
-        final_ranked.append((nid, combined))
+        fresh = check_source_freshness(node.source_ref, node.source_hash)
+        combined = (0.55 * rr + 0.45 * norm_rrf) * salience * scope_boost * freshness_multiplier(fresh)
+        final_ranked.append((nid, combined, fresh))
 
     final_ranked.sort(key=lambda x: x[1], reverse=True)
 
-    # Strict Token Budget Packing (L1 structured cards)
+    # Strict Token Budget Packing (compact pointer-first L1 cards)
     used_tokens = 0
     results: list[dict[str, Any]] = []
-    for nid, score in final_ranked:
+    for nid, score, fresh in final_ranked:
         if len(results) >= limit:
             break
         node = valid_map[nid]
-        card = node.to_l1_dict()
+        raw_card = node.to_l1_dict()
+        # Strip empty/null noise fields to maximize useful context per token budget
+        card: dict[str, Any] = {
+            k: v
+            for k, v in raw_card.items()
+            if k not in ("source_hash", "verified_at")
+            and v is not None
+            and v != ""
+            and v != []
+        }
+        if fresh != "untracked":
+            card["freshness"] = fresh
+        if node.source_ref:
+            card["l2_hint"] = f"source: {node.source_ref}"
         card["score"] = round(score, 4)
         card["channels"] = channels.get(nid, [])
         cost = estimate_json_tokens(card)
         if used_tokens + cost > budget:
             if not results and budget >= 40:
                 # Guarantee at least top-1 trimmed to budget
-                card["rationale"] = ""
-                card["rule"] = truncate_to_tokens(card["rule"], max(16, budget // 3))
+                card.pop("rationale", None)
+                card["rule"] = truncate_to_tokens(str(card.get("rule", "")), max(16, budget // 3))
                 cost = estimate_json_tokens(card)
             else:
                 continue
@@ -593,6 +614,9 @@ class BrainEngine:
         entities = extract_entities(atom.raw, meta.get("entities"))
         triggers = extract_triggers(atom.raw, atom.scope, entities, meta.get("trigger_when"))
 
+        source_ref, source_hash = resolve_legacy_source_ref(atom.scope or "global", atom.source, meta)
+        verified_at = str(meta.get("verified_at") or (atom.ts[:10] if len(atom.ts) >= 10 else ""))
+
         node = CompiledNode(
             id=node_id,
             type=atom.kind,
@@ -614,6 +638,9 @@ class BrainEngine:
             rule=rule,
             rationale=rationale,
             guard_hint=str(meta.get("guard_hint") or ""),
+            source_ref=source_ref,
+            source_hash=source_hash,
+            verified_at=verified_at,
             entities=entities,
             contradicts=list(meta.get("contradicts") or []),
             evidence_ids=[atom.id],
@@ -850,7 +877,7 @@ class BrainEngine:
         limit: int = 20,
     ) -> dict[str, Any]:
         with self.snapshots.open_current(read_only=True) as db:
-            return query_snapshot_recall(
+            res = query_snapshot_recall(
                 db,
                 query,
                 embedder=self.providers.embedder,
@@ -862,6 +889,9 @@ class BrainEngine:
                 limit=limit,
                 mode="online",
             )
+        if as_of is None and res.get("results"):
+            record_recall_hits(self.data_dir, [str(r["id"]) for r in res["results"] if r.get("id")])
+        return res
 
     def get(
         self,
@@ -938,15 +968,35 @@ class BrainEngine:
         by_scope: dict[str, int] = {}
         by_severity: dict[str, int] = {"P0": 0, "P1": 0, "P2": 0}
 
+        usage_stats = load_usage_stats(self.data_dir)
+        active_rule_tokens: list[int] = []
+        bloated_nodes = 0
+        pointer_nodes = 0
+        drifted_nodes = 0
+        broken_ref_nodes = 0
+
         node_dicts: list[dict[str, Any]] = []
         for n in all_nodes:
             by_status[n.status] = by_status.get(n.status, 0) + 1
+            fresh = check_source_freshness(n.source_ref, n.source_hash) if n.status == "active" else "untracked"
             if n.status == "active":
                 by_type[n.type] = by_type.get(n.type, 0) + 1
                 by_scope[n.scope] = by_scope.get(n.scope, 0) + 1
                 by_severity[n.severity] = by_severity.get(n.severity, 0) + 1
+                rt = estimate_tokens(n.rule)
+                active_rule_tokens.append(rt)
+                if rt > 100:
+                    bloated_nodes += 1
+                if n.source_ref:
+                    pointer_nodes += 1
+                if fresh == "drifted":
+                    drifted_nodes += 1
+                elif fresh == "broken_ref":
+                    broken_ref_nodes += 1
             d = n.to_dict()
             d["pinned"] = n.id in pinned_ids
+            d["freshness"] = fresh
+            d["recall_hits"] = int((usage_stats.get(n.id) or {}).get("hits", 0))
             node_dicts.append(d)
 
         # Rejected snapshots count for regression gate visibility
@@ -957,6 +1007,9 @@ class BrainEngine:
         from fos.proposals import ProposalStore
 
         pending_proposals = sum(1 for p in ProposalStore(self.data_dir).load_all() if p.status == "pending")
+        active_cnt = len(active_rule_tokens)
+        avg_rule_tokens = round(sum(active_rule_tokens) / active_cnt, 1) if active_cnt else 0.0
+        pointer_pct = round(100.0 * pointer_nodes / active_cnt, 1) if active_cnt else 0.0
 
         recent_atoms = [a.to_dict() for a in reversed(atoms[-ledger_limit:])]
         return {
@@ -975,6 +1028,14 @@ class BrainEngine:
                 "pinned_nodes": len(pinned_ids),
                 "edges": len(all_edges),
                 "pending_proposals": pending_proposals,
+            },
+            "hygiene": {
+                "avg_rule_tokens": avg_rule_tokens,
+                "bloated_nodes": bloated_nodes,
+                "pointer_nodes": pointer_nodes,
+                "pointer_coverage_pct": pointer_pct,
+                "drifted_nodes": drifted_nodes,
+                "broken_ref_nodes": broken_ref_nodes,
             },
             "distributions": {
                 "by_status": by_status,

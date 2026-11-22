@@ -72,13 +72,18 @@ export function OverviewPanel({ dashboard }: OverviewPanelProps) {
   })
 
   const c = dashboard.counts
+  const h = dashboard.hygiene
   const kpis = [
     { label: "活跃记忆 Active", value: c.active_nodes, sub: `总节点 ${c.total_nodes}` },
-    { label: "已纠偏 Superseded", value: c.superseded_nodes, sub: "双时态保留可回溯" },
-    { label: "已归档 Archived", value: c.archived_nodes, sub: "过期或已守卫化" },
-    { label: "不可变账本 Atoms", value: c.ledger_atoms, sub: "Append-Only JSONL" },
-    { label: "关系图谱 Edges", value: c.edges, sub: "SUPERSEDES / APPLIES_TO" },
-    { label: "黄金回归集 Golden", value: c.golden_cases, sub: `已钉选 P0: ${c.pinned_nodes}` },
+    { label: "平均 L1 长度", value: h ? `${h.avg_rule_tokens}t` : "-", sub: `超胖(>100t): ${h?.bloated_nodes ?? 0}` },
+    { label: "原文指针覆盖", value: h ? `${h.pointer_coverage_pct}%` : "-", sub: `绑定 source_ref: ${h?.pointer_nodes ?? 0}` },
+    {
+      label: "抗腐化告警",
+      value: (h?.drifted_nodes ?? 0) + (h?.broken_ref_nodes ?? 0),
+      sub: `漂移 ${h?.drifted_nodes ?? 0} · 断链 ${h?.broken_ref_nodes ?? 0}`,
+    },
+    { label: "不可变账本 Atoms", value: c.ledger_atoms, sub: `已纠偏 ${c.superseded_nodes} · 已归档 ${c.archived_nodes}` },
+    { label: "待审推荐 Inbox", value: c.pending_proposals ?? 0, sub: `关系边 ${c.edges} · 金标 ${c.golden_cases}` },
   ]
 
   const scopeEntries = Object.entries(dashboard.distributions.by_scope).sort((a, b) => b[1] - a[1])

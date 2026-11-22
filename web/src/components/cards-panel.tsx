@@ -296,6 +296,20 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode }: CardsPan
                     <Badge variant="outline" className="rounded-md text-xs">
                       {detailNode.status}
                     </Badge>
+                    {detailNode.freshness && detailNode.freshness !== "untracked" && (
+                      <Badge
+                        variant={
+                          detailNode.freshness === "broken_ref"
+                            ? "destructive"
+                            : detailNode.freshness === "drifted"
+                            ? "secondary"
+                            : "outline"
+                        }
+                        className="rounded-md font-mono text-xs"
+                      >
+                        {detailNode.freshness}
+                      </Badge>
+                    )}
                   </div>
                   <div className="flex items-center gap-1.5">
                     <Button
@@ -355,6 +369,17 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode }: CardsPan
                     >
                       跳转查看
                     </Button>
+                  </div>
+                )}
+
+                {detailNode.source_ref && (
+                  <div className="flex flex-col gap-1">
+                    <div className="text-xs font-medium text-muted-foreground">
+                      权威源指针 Source Pointer (Progressive Disclosure)
+                    </div>
+                    <div className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-foreground break-all">
+                      {detailNode.source_ref}
+                    </div>
                   </div>
                 )}
 

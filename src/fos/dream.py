@@ -21,6 +21,7 @@ from fos.engine import (
 )
 from fos.errors import GateFailedError
 from fos.eval_gate import evaluate_snapshot
+from fos.freshness import resolve_legacy_source_ref
 from fos.models import (
     KIND_PREFIX,
     VALID_KINDS,
@@ -33,7 +34,7 @@ from fos.models import (
 )
 from fos.providers import Reasoner, build_providers
 from fos.store import SnapshotDB
-from fos.tokens import extract_terms
+from fos.tokens import estimate_tokens, extract_terms, truncate_to_tokens
 
 _NOISE_PATTERNS = (
     re.compile(r"^(?:ok|okay|thanks|thx|got it|sure|好的|收到|谢谢|嗯|行)[\s.!！。]*$", re.IGNORECASE),
@@ -71,13 +72,14 @@ KEEP (keep = true) ONLY high-compounding, settled knowledge in 3 categories:
 3. `decision`: Deliberate architectural, module, or stack trade-off (A chosen over B) with durable rationale.
 
 For `hindsight:docs:*` entries (sourced from AGENTS.md / GEMINI.md / FRONTEND.md / DESIGN.md / LESSONS.md):
-- Distill durable coding style rules, UI/frontend conventions, architecture preferences, and engineering guardrails into crisp, reusable cards.
+- POINTER-FIRST PROGRESSIVE DISCLOSURE (ANTI-ROT & ANTI-BLOAT): The authoritative doc file remains on disk and is attached automatically via `source_ref`. NEVER copy long tables, exhaustive field mappings, port lists, or multi-paragraph manuals into `rule`!
+- Distill ONLY the single highest-leverage architectural invariant, boundary rule, or design constraint into 1-2 crisp sentences so agents know WHEN to follow it and WHICH source doc to read for full details.
 - Drop boilerplate repo commands (like `make dev`, `npm test` listings) or temporary setup steps that are not design principles or engineering rules.
 
-When keep = true:
-- `rule`: ONE crisp, timeless, actionable directive (no account IDs, no temporary counts, no one-off ticket numbers). Preserve ALL exact technical flags, negations (禁止/不要/必须/never/must), and durable technical constants!
-- `rationale`: First-principles WHY (structural root cause, not ticket narrative).
-- `guard_hint`: If this rule can be enforced mechanically via lint/unit-test/pre-commit/CI guard (fops LESSONS.md Rule #3), briefly state how; otherwise "".
+When keep = true (STRICT L1 TOKEN BUDGET — anti-context-rot):
+- `rule`: MAX 1-2 crisp sentences (**<= 65 tokens / ~80 Chinese chars**). Actionable, timeless, no ticket IDs, no raw dumps. Preserve ALL exact technical flags, negations (禁止/不要/必须/never/must), and durable technical constants!
+- `rationale`: MAX 1 short sentence (**<= 35 tokens**): first-principles structural WHY.
+- `guard_hint`: MAX 1 short sentence (**<= 30 tokens**): mechanical lint/unit-test/CI check if enforceable, otherwise "".
 - `scope`: ALWAYS keep the input repo `scope` for any lesson mentioning repo/domain concepts (e.g. 渠道/供应商/适配器/金标用例/evidence_ids/具体接口). Use `"global"` ONLY for universal personal principles (`kind="principle"`) or OS/shell/git/engineering laws that apply identically to ANY repo with zero domain assumptions.
 - `severity`: P0 only for universal redlines or explicit user principles; P1 for generalizable engineering lessons/decisions; P2 for narrow repo-only constraints.
 - `trigger_when`: 2-3 crisp situations when future AI should recall this before acting.
@@ -136,6 +138,11 @@ def _save_distill_cache(cache_path: Path, cache: dict[str, dict[str, Any]]) -> N
     os.replace(tmp, cache_path)
 
 
+_L1_RULE_MAX_TOKENS = 95
+_L1_RATIONALE_MAX_TOKENS = 48
+_L1_GUARD_MAX_TOKENS = 42
+
+
 def _distill_hindsight_batch(
     atoms: list[LedgerAtom],
     reasoner: Reasoner,
@@ -154,10 +161,17 @@ def _distill_hindsight_batch(
         if atom.source.startswith("manual"):
             continue
         ckey = f"{atom.id}@{reasoner.model_name}"
-        if ckey in cache:
-            results[atom.id] = cache[ckey]
+        cached = cache.get(ckey)
+        # Re-distill legacy bloated cache entries (>95t rule) into compact pointer-first summaries
+        is_bloated_cached = bool(
+            cached
+            and cached.get("keep", True)
+            and estimate_tokens(str(cached.get("rule") or "")) > _L1_RULE_MAX_TOKENS
+        )
+        if cached is not None and not is_bloated_cached:
+            results[atom.id] = cached
             stats["distill_cache_hits"] += 1
-            if cache[ckey].get("keep", True):
+            if cached.get("keep", True):
                 stats["distilled_kept"] += 1
             else:
                 stats["distilled_dropped"] += 1
@@ -535,6 +549,18 @@ def _compile_dream_nodes(
             counters[prefix] = counters.get(prefix, 0) + 1
             node_id = f"{prefix}-{counters[prefix]:03d}"
 
+        source_ref, source_hash = resolve_legacy_source_ref(atom_scope, atom.source, meta)
+        verified_at = str(meta.get("verified_at") or atom_date or "")
+
+        # Deterministic anti-bloat L1 clamp for automated hindsight cards (full raw stays in L2 ledger + source_ref)
+        if not atom.source.startswith("manual"):
+            if estimate_tokens(rule) > _L1_RULE_MAX_TOKENS:
+                rule = truncate_to_tokens(rule, _L1_RULE_MAX_TOKENS)
+            if estimate_tokens(rationale) > _L1_RATIONALE_MAX_TOKENS:
+                rationale = truncate_to_tokens(rationale, _L1_RATIONALE_MAX_TOKENS)
+            if estimate_tokens(guard_hint) > _L1_GUARD_MAX_TOKENS:
+                guard_hint = truncate_to_tokens(guard_hint, _L1_GUARD_MAX_TOKENS)
+
         node = CompiledNode(
             id=node_id,
             type=atom_kind,
@@ -558,6 +584,9 @@ def _compile_dream_nodes(
             rule=rule,
             rationale=rationale,
             guard_hint=guard_hint,
+            source_ref=source_ref,
+            source_hash=source_hash,
+            verified_at=verified_at,
             entities=entities,
             contradicts=list(meta.get("contradicts") or []),
             evidence_ids=[atom.id],

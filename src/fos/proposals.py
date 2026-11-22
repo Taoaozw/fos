@@ -26,6 +26,7 @@ from typing import Any, Literal
 
 from fos.engine import BrainEngine, build_l0_line, node_embedding_text
 from fos.errors import ExitCode, FosError, NotFoundError, UsageError
+from fos.freshness import check_source_freshness, load_usage_stats
 from fos.models import CompiledNode, VALID_KINDS, normalize_severity, now_iso, parse_timestamp
 from fos.providers import HeuristicReasoner, Reasoner
 from fos.tokens import estimate_tokens as count_tokens, tokenize_for_fts, truncate_to_tokens
@@ -604,15 +605,35 @@ def find_stale_candidates(
     nodes: list[CompiledNode],
     pinned_ids: set[str],
     *,
+    usage_stats: dict[str, dict[str, Any]] | None = None,
     stale_days: int = 90,
 ) -> list[dict[str, Any]]:
-    """Find unpinned non-P0 nodes older than `stale_days` with seen_count==1."""
+    """Find broken/drifted source pointers (0-day anti-rot) and cold aged single-sighting nodes."""
     now_dt = datetime.now(timezone.utc)
+    stats = usage_stats or {}
     stale: list[dict[str, Any]] = []
     for n in nodes:
-        if n.status != "active" or n.severity == "P0" or n.type == "principle" or n.id in pinned_ids:
+        if n.status != "active" or n.id in pinned_ids:
             continue
-        if n.seen_count > 1:
+        fresh = check_source_freshness(n.source_ref, n.source_hash)
+        if fresh in ("broken_ref", "drifted"):
+            stale.append(
+                {
+                    "id": n.id,
+                    "scope": n.scope,
+                    "type": n.type,
+                    "severity": n.severity,
+                    "rot_reason": fresh,
+                    "source_ref": n.source_ref,
+                    "age_days": 0,
+                    "rule": n.rule[:220],
+                }
+            )
+            continue
+        if n.severity == "P0" or n.type == "principle" or n.seen_count > 1:
+            continue
+        hits = int((stats.get(n.id) or {}).get("hits", 0))
+        if hits >= 2:
             continue
         dt = parse_timestamp(n.updated_at or n.valid_from)
         if dt is None:
@@ -625,11 +646,13 @@ def find_stale_candidates(
                     "scope": n.scope,
                     "type": n.type,
                     "severity": n.severity,
+                    "rot_reason": "aged_unhit",
+                    "source_ref": n.source_ref,
                     "age_days": int(age_days),
                     "rule": n.rule[:220],
                 }
             )
-    return stale[:5]
+    return stale[:8]
 
 
 # ---------------------------------------------------------------------------
@@ -780,21 +803,34 @@ def _heuristic_synthesize(
                 }
             )
 
-    for st in stale_candidates[:1]:
+    for st in stale_candidates[:3]:
+        rot_reason = st.get("rot_reason", "aged_unhit")
+        if rot_reason == "broken_ref":
+            title = f"源文件已删除，建议归档 {st['id']}"
+            rationale = f"权威源文件 `{st.get('source_ref', '')}` 已不存在，保留摘要会产生过期误导。"
+            conf = 0.92
+        elif rot_reason == "drifted":
+            title = f"源文件已变更，建议刷新或归档 {st['id']}"
+            rationale = f"权威源文件 `{st.get('source_ref', '')}` 内容已漂移，建议重新采集或归档旧摘要。"
+            conf = 0.84
+        else:
+            title = f"归档长期未复用条目 {st['id']}"
+            rationale = f"该条目已超过 {st['age_days']} 天且仅出现 1 次，建议归档以保持检索信噪比。"
+            conf = 0.72
         out.append(
             {
                 "kind": "retire_stale",
-                "topic_key": f"retire-{st['id'].lower()}",
-                "title": f"归档长期未复用条目 {st['id']}",
+                "topic_key": f"retire-{rot_reason}-{st['id'].lower()}",
+                "title": title,
                 "proposed_type": st["type"],
                 "proposed_severity": st["severity"],
                 "proposed_rule": st["rule"],
-                "proposed_rationale": f"该条目已超过 {st['age_days']} 天且仅出现 1 次，建议归档以保持检索信噪比。",
+                "proposed_rationale": rationale,
                 "proposed_guard_hint": "",
                 "proposed_trigger_when": [],
                 "evidence_repos": [st["scope"]],
                 "target_node_ids": [st["id"]],
-                "confidence": 0.72,
+                "confidence": conf,
             }
         )
 
@@ -895,7 +931,11 @@ def scan_proposals(
     cluster_scopes = owned_scopes if owned_scopes else None
     cross_clusters = find_cross_repo_clusters(active_nodes, emb_map, allowed_scopes=cluster_scopes)
     global_overlaps = find_global_overlap_clusters(active_nodes, emb_map)
-    stale_candidates = find_stale_candidates(active_nodes, pinned_ids)
+    stale_candidates = find_stale_candidates(
+        active_nodes,
+        pinned_ids,
+        usage_stats=load_usage_stats(engine.data_dir),
+    )
 
     existing_globals = [
         {"id": n.id, "type": n.type, "severity": n.severity, "rule": n.rule[:220]}

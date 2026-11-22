@@ -26,6 +26,11 @@ export interface CompiledNode {
   rule: string
   rationale: string
   guard_hint: string
+  source_ref?: string
+  source_hash?: string
+  verified_at?: string
+  freshness?: "fresh" | "drifted" | "broken_ref" | "untracked" | string
+  recall_hits?: number
   entities: string[]
   contradicts: string[]
   evidence_ids: string[]
@@ -72,6 +77,14 @@ export interface DashboardResponse {
     pinned_nodes: number
     edges: number
     pending_proposals?: number
+  }
+  hygiene?: {
+    avg_rule_tokens: number
+    bloated_nodes: number
+    pointer_nodes: number
+    pointer_coverage_pct: number
+    drifted_nodes: number
+    broken_ref_nodes: number
   }
   distributions: {
     by_status: Record<string, number>

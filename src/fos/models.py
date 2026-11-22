@@ -102,6 +102,9 @@ class CompiledNode:
     rule: str = ""
     rationale: str = ""
     guard_hint: str = ""
+    source_ref: str = ""  # Authoritative pointer (e.g. /abs/path/docs/DESIGN.md#section or git:repo@sha)
+    source_hash: str = ""  # 16-char SHA-256 of authoritative source content at capture/verify time
+    verified_at: str = ""  # YYYY-MM-DD when last verified against authoritative source
     entities: list[str] = field(default_factory=list)
     contradicts: list[str] = field(default_factory=list)
     evidence_ids: list[str] = field(default_factory=list)
@@ -126,6 +129,9 @@ class CompiledNode:
             "rule": self.rule,
             "rationale": self.rationale,
             "guard_hint": self.guard_hint,
+            "source_ref": self.source_ref,
+            "source_hash": self.source_hash,
+            "verified_at": self.verified_at,
             "entities": list(self.entities),
             "contradicts": list(self.contradicts),
             "evidence_ids": list(self.evidence_ids),
@@ -156,6 +162,9 @@ class CompiledNode:
             rule=str(data.get("rule", "")),
             rationale=str(data.get("rationale", "")),
             guard_hint=str(data.get("guard_hint", "")),
+            source_ref=str(data.get("source_ref", "")),
+            source_hash=str(data.get("source_hash", "")),
+            verified_at=str(data.get("verified_at", "")),
             entities=list(data.get("entities") or []),
             contradicts=list(data.get("contradicts") or []),
             evidence_ids=list(data.get("evidence_ids") or []),
