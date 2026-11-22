@@ -141,7 +141,7 @@ def _save_distill_cache(cache_path: Path, cache: dict[str, dict[str, Any]]) -> N
 _L1_RULE_MAX_TOKENS = 95
 _L1_RATIONALE_MAX_TOKENS = 48
 _L1_GUARD_MAX_TOKENS = 42
-_NEGATION_RE = re.compile(r"(?:禁止|不要|不得|不可|严禁|切勿|避免|不能|\b(?:never|avoid|must\s+not|do\s+not|don't|forbid)\b)", re.IGNORECASE)
+_NEGATION_RE = re.compile(r"(?:禁止|不要|不得|不可|严禁|切勿|避免|不能|无需|不必|不添|不改|\b(?:never|avoid|must\s+not|do\s+not|don't|forbid)\b)", re.IGNORECASE)
 
 
 def _distill_hindsight_batch(

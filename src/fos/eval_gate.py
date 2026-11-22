@@ -20,7 +20,7 @@ _CRITICAL_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 _NEGATION_POLARITY_RE = re.compile(
-    r"(?:禁止|不要|严禁|不能|不支持|不得|避免|never|must not|avoid|do not|don't)",
+    r"(?:禁止|不要|严禁|不能|不支持|不得|避免|无需|不必|切勿|不添|不改|不臆测|never|must not|avoid|do not|don't)",
     re.IGNORECASE,
 )
 _OBLIGATION_POLARITY_RE = re.compile(
