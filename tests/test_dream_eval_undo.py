@@ -198,3 +198,50 @@ def test_dream_llm_distillation_drops_noise_and_caches(tmp_path: Path) -> None:
     res2 = run_dream(engine)
     assert res2["stats"]["distill_cache_hits"] == 2
     assert distiller.calls == 1
+
+
+def test_dream_scope_invariant_keeps_single_repo_local_and_elevates_cross_repo(tmp_path: Path) -> None:
+    from fos.providers import LexicalReranker, LocalHashEmbedder, ProviderBundle
+
+    class _OverEagerGlobalDistiller:
+        @property
+        def model_name(self) -> str:
+            return "mock:overeager"
+
+        def complete_json(self, prompt: str, *, system: str = "") -> dict | None:
+            import json as _json
+
+            batch = _json.loads(prompt[prompt.index("[") :])
+            return {
+                "items": [
+                    {
+                        "id": entry["id"],
+                        "keep": True,
+                        "kind": "lesson",
+                        "scope": "global",  # LLM tries to promote everything to global
+                        "severity": "P1",
+                        "rule": entry["raw"].replace("Hindsight: ", ""),
+                        "rationale": "root cause",
+                        "trigger_when": ["trigger"],
+                    }
+                    for entry in batch
+                ]
+            }
+
+        def unload(self) -> None:
+            return
+
+    providers = ProviderBundle(embedder=LocalHashEmbedder(), reranker=LexicalReranker(), reasoner=_OverEagerGlobalDistiller())
+    engine = BrainEngine(tmp_path / "brain", providers=providers)
+
+    # Single-repo git fix MUST remain scoped to 'goto' even when LLM suggests 'global'
+    engine.add_atom(kind="lesson", scope="goto", source="hindsight:git:goto", content="Hindsight: 渠道用量必须保留小数精度")
+    # Same engineering law hit in TWO distinct repos ('fops' + 'goto') MUST elevate to 'global'
+    engine.add_atom(kind="lesson", scope="fops", source="hindsight:git:fops", content="Hindsight: 禁止依赖 rsync --mkpath，必须先 ssh mkdir -p")
+    engine.add_atom(kind="lesson", scope="goto", source="hindsight:git:goto", content="Hindsight: 禁止依赖 rsync --mkpath，必须先 ssh mkdir -p")
+
+    res = run_dream(engine)
+    assert res["promoted"] is True
+    assert engine.get("LSN-001", tier="L1")["node"]["scope"] == "goto"
+    assert engine.get("LSN-002", tier="L1")["node"]["scope"] == "global"
+    assert engine.get("LSN-002", tier="L1")["node"]["seen_count"] == 2

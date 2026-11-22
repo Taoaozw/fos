@@ -55,7 +55,7 @@ When keep = true:
 - `rule`: ONE crisp, timeless, actionable directive (no account IDs, no temporary counts, no one-off ticket numbers). Preserve ALL exact technical flags, negations (禁止/不要/必须/never/must), and durable technical constants!
 - `rationale`: First-principles WHY (structural root cause, not ticket narrative).
 - `guard_hint`: If this rule can be enforced mechanically via lint/unit-test/pre-commit/CI guard (fops LESSONS.md Rule #3), briefly state how; otherwise "".
-- `scope`: Use "global" for cross-project principles/engineering laws; keep repo name ONLY if strictly repo-specific.
+- `scope`: ALWAYS keep the input repo `scope` for any lesson mentioning repo/domain concepts (e.g. 渠道/供应商/适配器/金标用例/evidence_ids/具体接口). Use `"global"` ONLY for universal personal principles (`kind="principle"`) or OS/shell/git/engineering laws that apply identically to ANY repo with zero domain assumptions.
 - `severity`: P0 only for universal redlines or explicit user principles; P1 for generalizable engineering lessons/decisions; P2 for narrow repo-only constraints.
 - `trigger_when`: 2-3 crisp situations when future AI should recall this before acting.
 
@@ -229,7 +229,8 @@ def _compile_dream_nodes(
     for atom in cleaned:
         meta = dict(atom.meta)
         atom_kind = atom.kind
-        atom_scope = atom.scope or "global"
+        origin_scope = (atom.scope or "global").strip().lower()
+        atom_scope = origin_scope
         guard_hint = str(meta.get("guard_hint") or "")
 
         # Apply LLM sleep distillation verdict if available for automated hindsight atoms
@@ -240,10 +241,20 @@ def _compile_dream_nodes(
                 continue
             if dist.get("kind") in VALID_KINDS:
                 atom_kind = dist["kind"]
-            if dist.get("scope"):
-                atom_scope = dist["scope"]
-            if atom_kind == "principle":
+            suggested_scope = str(dist.get("scope") or origin_scope).strip().lower()
+            # Guard invariant: a single-repo git fix commit NEVER self-promotes to global on first sight.
+            # Only explicit user principles (not from single-repo git) or cross-repo recurrence earn global scope.
+            if atom.source.startswith("hindsight:git:") and origin_scope != "global":
+                atom_scope = origin_scope
+                if atom_kind == "principle":
+                    atom_kind = "lesson"
+            elif atom_kind == "principle":
                 atom_scope = "global"
+            elif origin_scope != "global" and suggested_scope == "global":
+                # Keep repo-bound lessons in their origin repo unless proven across multiple repos
+                atom_scope = origin_scope
+            else:
+                atom_scope = suggested_scope
             rule = dist["rule"]
             rationale = dist.get("rationale", "")
             guard_hint = dist.get("guard_hint", "")
@@ -266,20 +277,24 @@ def _compile_dream_nodes(
         severity = normalize_severity(meta.get("severity"), kind=atom_kind)
         atom_date = atom.ts[:10] if len(atom.ts) >= 10 else ""
 
-        # Consolidate: merge near-duplicate lessons/thoughts in same scope (unless explicitly superseding)
+        # Consolidate: merge near-duplicate lessons/thoughts/principles.
+        # If the same lesson recurs across >=2 distinct repos, elevate it to scope="global"!
         merged_target: CompiledNode | None = None
         if atom_kind in ("lesson", "thought", "principle") and not meta.get("supersedes") and not meta.get("node_id"):
             cand_terms = extract_terms(rule)
             for nid in node_order:
                 existing = nodes_by_id[nid]
-                if existing.type == atom_kind and existing.scope == atom_scope and existing.status == "active":
+                if existing.type == atom_kind and existing.status == "active":
                     if _jaccard(cand_terms, extract_terms(existing.rule)) >= 0.72:
-                        merged_target = existing
-                        break
+                        if existing.scope == atom_scope or atom_kind == "lesson":
+                            merged_target = existing
+                            break
 
         if merged_target is not None:
             merged_count += 1
             merged_target.seen_count += 1
+            if merged_target.scope != atom_scope and merged_target.scope != "global" and atom_scope != "global":
+                merged_target.scope = "global"
             if atom_date and atom_date not in merged_target.seen_dates:
                 merged_target.seen_dates.append(atom_date)
                 merged_target.seen_dates.sort()
