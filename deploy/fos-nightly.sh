@@ -13,8 +13,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 echo "=== [$(date -Iseconds)] FlowOS Nightly Sleep Cycle ==="
 
 if [ -d "$GIT_ROOT" ]; then
+  fos ingest --from docs --root "$GIT_ROOT" --limit 30 --json || true
   fos ingest --from git --root "$GIT_ROOT" --since 48h --limit 30 --json || true
 fi
+fos ingest --from docs --limit 20 --json || true
 fos ingest --from all --since 48h --limit 25 --json || true
 
 # Run LLM-distilled dream + Reflect + TTL decay + 4-dimension Regression Gate

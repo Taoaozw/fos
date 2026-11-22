@@ -166,3 +166,19 @@ def test_ingest_git_and_high_signal_chat_collectors(tmp_path: Path) -> None:
     assert len(fops_events) == 1
     assert fops_events[0]["kind"] == "lesson"
     assert fops_events[0]["scope"] == "fops"
+
+    # 7. docs collector (AGENTS.md / FRONTEND.md rules with context7 boilerplate stripped & SHA cursor)
+    doc_dir = tmp_path / "design-repo"
+    (doc_dir / "docs").mkdir(parents=True)
+    (doc_dir / "AGENTS.md").write_text(
+        "# 代码规范\n\n## 前端规范\n所有 UI 一律使用 shadcn Base UI 组件和语义主题 Token，禁止写死十六进制颜色或 Tailwind 调色板颜色。\n"
+        "<!-- context7 -->\nUse ctx7 CLI boilerplate\n<!-- context7 -->\n",
+        encoding="utf-8",
+    )
+    doc_events = collect_hindsight_events("docs", root_dir=doc_dir, cursor_path=cursor_path)
+    assert len(doc_events) == 1
+    assert doc_events[0]["scope"] == "design-repo"
+    assert "shadcn Base UI" in doc_events[0]["raw"]
+    assert "ctx7 CLI boilerplate" not in doc_events[0]["raw"]
+    # Unchanged doc produces 0 duplicates via SHA-256 cursor
+    assert collect_hindsight_events("docs", root_dir=doc_dir, cursor_path=cursor_path) == []

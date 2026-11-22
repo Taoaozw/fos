@@ -66,9 +66,13 @@ DROP (keep = false) IMMEDIATELY if the episode is ANY of:
 3. Trivial task requests that do not express a reusable preference, pitfall, or architectural trade-off.
 
 KEEP (keep = true) ONLY high-compounding, settled knowledge in 3 categories:
-1. `principle` (scope="global"): User's durable engineering taste, design philosophy, or workflow preference (e.g., "Prefer CLI + embedded Skill over MCP for local tools", "Use Guard Tests over verbal reminders").
-2. `lesson`: Generalizable technical/shell/code/architecture pitfall with a first-principles root cause (like fops LESSONS.md: e.g., "Never rely on GNU rsync --mkpath on macOS openrsync; create remote dir via ssh mkdir -p first", "Use [f]ops in pkill -f inside sh -c to avoid killing own subshell").
-3. `decision`: Deliberate architectural or stack trade-off (A chosen over B) with durable rationale.
+1. `principle` (scope="global"): User's durable engineering taste, coding rules, frontend/backend stack preferences, or workflow redlines (e.g., "Prefer CLI + embedded Skill over MCP", "Use shadcn Base UI + semantic theme tokens, no raw HTML UI elements or hardcoded palette colors", "Prefer smallest viable local change & orthogonal primitives", "Use Guard Tests over verbal reminders").
+2. `lesson`: Generalizable technical/shell/code/architecture pitfall with a first-principles root cause (like fops LESSONS.md).
+3. `decision`: Deliberate architectural, module, or stack trade-off (A chosen over B) with durable rationale.
+
+For `hindsight:docs:*` entries (sourced from AGENTS.md / GEMINI.md / FRONTEND.md / DESIGN.md / LESSONS.md):
+- Distill durable coding style rules, UI/frontend conventions, architecture preferences, and engineering guardrails into crisp, reusable cards.
+- Drop boilerplate repo commands (like `make dev`, `npm test` listings) or temporary setup steps that are not design principles or engineering rules.
 
 When keep = true:
 - `rule`: ONE crisp, timeless, actionable directive (no account IDs, no temporary counts, no one-off ticket numbers). Preserve ALL exact technical flags, negations (禁止/不要/必须/never/must), and durable technical constants!

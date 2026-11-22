@@ -209,8 +209,8 @@ def build_parser() -> _StrictArgumentParser:
     p_arc.add_argument("--json", action="store_true")
 
     # ingest
-    p_ingest = sub.add_parser("ingest", aliases=["ing"], help="Collect high-compounding hindsight signals from git fixes & AI sessions")
-    p_ingest.add_argument("--from", dest="source", required=True, choices=["git", "antigravity", "claude", "codex", "pi", "fops", "all"])
+    p_ingest = sub.add_parser("ingest", aliases=["ing"], help="Collect high-compounding hindsight signals from docs/rules, git fixes & AI sessions")
+    p_ingest.add_argument("--from", dest="source", required=True, choices=["docs", "git", "antigravity", "claude", "codex", "pi", "fops", "all"])
     p_ingest.add_argument("--since", type=str, default="24h")
     p_ingest.add_argument("--root", type=str, default=None, help="Override trace root directory")
     p_ingest.add_argument("--limit", type=int, default=50)

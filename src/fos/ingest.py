@@ -10,6 +10,7 @@ First-principles design (modeled on fops LESSONS.md + Songe + Hindsight):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -22,13 +23,14 @@ from fos.errors import UsageError
 from fos.models import now_iso, parse_timestamp
 from fos.redact import redact_secrets
 
-VALID_SOURCES = ("git", "antigravity", "claude", "codex", "pi", "fops")
+VALID_SOURCES = ("docs", "git", "antigravity", "claude", "codex", "pi", "fops")
 ALL_SOURCES_ALIAS = "all"
 
-# High-compounding human correction / taste / principle signals (NOT one-off ops tickets)
+# High-compounding human correction / taste / principle signals (both negative redlines and positive stack/architecture preferences)
 _TASTE_CORRECTION_RE = re.compile(
     r"(?:不要用|不要做|不要再|不要\s*[a-zA-Z]{2,}|别用|禁止|严禁|以后不要|下次不要|我希望(?:他|它)?是|"
-    r"偏好|第一性原理|过度抽象|太重了|参考.{1,15}(?:思路|做法|设计)|从.{1,10}出发|应该用|统一用|一律用|改用|换成|"
+    r"偏爱|偏好|习惯用|单独做一个|第一性原理|过度抽象|太重了|参考.{1,15}(?:思路|做法|设计)|从.{1,10}出发|应该用|统一用|一律用|改用|换成|"
+    r"用\s*(?:react|ts|typescript|vite|tailwind|shadcn|bun|uv|sqlite|go|python|rust)\b.*(?:单独|做|写|开发|重构)|"
     r"never use\b|do not use\b|don't use\b|instead of\b|i prefer\b|stop doing\b|remember to\b|lesson learned|root cause)",
     re.IGNORECASE,
 )
@@ -341,6 +343,160 @@ def _collect_git_fix_events(
 
 
 # ---------------------------------------------------------------------------
+# Architecture / Rules / LESSONS.md Corpus Collector (--from docs)
+# ---------------------------------------------------------------------------
+
+_DOC_INJECTED_BLOCK_RE = re.compile(
+    r"<!--\s*(?:context7|rtk-owned)[\s\S]*?(?:<!--\s*context7\s*-->|$)",
+    re.IGNORECASE,
+)
+_REPO_DOC_NAMES: tuple[str, ...] = (
+    "AGENTS.md",
+    "CLAUDE.md",
+    "LESSONS.md",
+    "docs/FRONTEND.md",
+    "docs/DESIGN.md",
+    "docs/ARCHITECTURE.md",
+)
+
+
+def _strip_doc_tool_boilerplate(text: str) -> str:
+    cleaned = _DOC_INJECTED_BLOCK_RE.sub("", text)
+    # Remove @RTK.md / @AGENTS.md single-line includes
+    lines = [l for l in cleaned.splitlines() if not re.fullmatch(r"\s*@[A-Za-z0-9_./-]+\s*", l)]
+    return "\n".join(lines).strip()
+
+
+def _split_markdown_sections(text: str, *, max_chars: int = 1300) -> list[tuple[str, str]]:
+    """Split markdown into (heading, body) chunks suitable for cognitive distillation."""
+    sections: list[tuple[str, str]] = []
+    cur_heading = "Overview"
+    cur_lines: list[str] = []
+
+    def _flush() -> None:
+        body = "\n".join(cur_lines).strip()
+        if len(body) >= 40:
+            sections.append((cur_heading, body[:max_chars]))
+
+    for line in text.splitlines():
+        m = re.match(r"^(#{1,2})\s+(.+?)\s*$", line)
+        if m:
+            _flush()
+            cur_heading = m.group(2).strip()
+            cur_lines = []
+        else:
+            cur_lines.append(line)
+    _flush()
+
+    if not sections and len(text.strip()) >= 40:
+        sections.append(("Rules", text.strip()[:max_chars]))
+    return sections
+
+
+def _collect_docs_events(
+    *,
+    root_dir: Path | None,
+    cursor_path: Path | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Collect architectural design preferences, code style rules & LESSONS.md from global + repo docs."""
+    cursors = _load_cursors(cursor_path) if cursor_path else {}
+    events: list[dict[str, Any]] = []
+    seen_hashes: set[str] = set()
+
+    candidates: list[tuple[str, str, Path]] = []  # (scope, source_label, path)
+
+    # 1. Global user agent rule files (only when scanning default workspace, not custom test root)
+    if root_dir is None:
+        home = Path.home()
+        for rel in (
+            ".gemini/GEMINI.md",
+            ".codex/AGENTS.md",
+            ".pi/agent/AGENTS.md",
+            ".claude/CLAUDE.md",
+        ):
+            p = home / rel
+            if p.is_file():
+                candidates.append(("global", f"hindsight:docs:global:{p.parent.name}", p))
+        rules_dir = home / ".claude" / "rules"
+        if rules_dir.is_dir():
+            for p in sorted(rules_dir.glob("*.md")):
+                candidates.append(("global", "hindsight:docs:global:claude-rules", p))
+
+    # 2. Repository AGENTS.md / LESSONS.md / docs/FRONTEND.md / docs/DESIGN.md
+    for repo in _discover_git_repos(root_dir):
+        scope = repo.name.lower()
+        for rel in _REPO_DOC_NAMES:
+            p = repo / rel
+            if p.is_file():
+                candidates.append((scope, f"hindsight:docs:{scope}", p))
+
+    # Also support scanning a plain non-git directory when explicitly passed via --root
+    if root_dir is not None and not _discover_git_repos(root_dir):
+        base = Path(root_dir).expanduser().resolve()
+        if base.is_dir():
+            for rel in _REPO_DOC_NAMES:
+                p = base / rel
+                if p.is_file():
+                    candidates.append((base.name.lower(), f"hindsight:docs:{base.name.lower()}", p))
+
+    for scope, source_label, fpath in candidates:
+        if len(events) >= limit:
+            break
+        try:
+            raw_text = fpath.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        cleaned = _strip_doc_tool_boilerplate(raw_text)
+        if len(cleaned) < 40:
+            continue
+
+        digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:16]
+        if digest in seen_hashes:
+            continue
+        seen_hashes.add(digest)
+
+        ckey = f"doc:{fpath.resolve()}"
+        if cursors.get(ckey) == digest:
+            continue
+
+        ts = datetime.fromtimestamp(fpath.stat().st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
+        is_lessons = fpath.name.upper() == "LESSONS.md"
+        kind = "lesson" if is_lessons else ("principle" if scope == "global" else "decision")
+        severity = "P0" if scope == "global" else "P1"
+
+        for heading, body in _split_markdown_sections(cleaned):
+            if len(events) >= limit:
+                break
+            payload_text = f"Hindsight: [{fpath.name} · {heading}]\n{body}"
+            red = redact_secrets(payload_text)
+            events.append(
+                {
+                    "kind": kind,
+                    "scope": scope,
+                    "source": source_label,
+                    "raw": red.text,
+                    "ts": ts,
+                    "meta": {
+                        "severity": severity,
+                        "collector": "docs",
+                        "doc_file": fpath.name,
+                        "doc_section": heading,
+                        "evidence_ref": f"doc:{fpath.name}#{heading[:40]}",
+                        "redacted_types": list(red.redacted_types),
+                    },
+                }
+            )
+
+        cursors[ckey] = digest
+
+    if cursor_path is not None:
+        _save_cursors(cursor_path, cursors)
+    return events
+
+
+# ---------------------------------------------------------------------------
 # Main Collector Entrypoint
 # ---------------------------------------------------------------------------
 
@@ -376,6 +532,8 @@ def collect_hindsight_events(
 
     if source == "git":
         return _collect_git_fix_events(since=since, root_dir=root_dir, cursor_path=cursor_path, limit=limit)
+    if source == "docs":
+        return _collect_docs_events(root_dir=root_dir, cursor_path=cursor_path, limit=limit)
 
     cutoff = parse_since_duration(since)
     cursors = _load_cursors(cursor_path) if cursor_path else {}
