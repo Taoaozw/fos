@@ -358,12 +358,32 @@ def query_snapshot_recall(
 
     final_ranked.sort(key=lambda x: x[1], reverse=True)
 
-    # Strict Token Budget Packing (compact pointer-first L1 cards)
+    # Strict Token Budget Packing with Submodular Query-Term Coverage
+    # (prevents redundant cards on one sub-topic from crowding out uncovered query concepts like "外键")
     used_tokens = 0
     results: list[dict[str, Any]] = []
-    for nid, score, fresh in final_ranked:
-        if len(results) >= limit:
-            break
+    q_terms_pack = extract_terms(query)
+    covered_terms: set[str] = set()
+    remaining = list(final_ranked)
+
+    while remaining and len(results) < limit:
+        if not results or not q_terms_pack or not (q_terms_pack - covered_terms):
+            best_idx = 0
+        else:
+            uncovered = q_terms_pack - covered_terms
+            best_idx = 0
+            best_val = -1.0
+            for idx, (cand_id, base_score, _cf) in enumerate(remaining[:12]):
+                cnode = valid_map[cand_id]
+                cand_terms = extract_terms(cnode.rule + " " + " ".join(cnode.entities))
+                novel = uncovered & cand_terms
+                novel_boost = 1.0 + 0.6 * (len(novel) / max(1, len(uncovered)))
+                val = base_score * novel_boost
+                if val > best_val:
+                    best_val = val
+                    best_idx = idx
+
+        nid, score, fresh = remaining.pop(best_idx)
         node = valid_map[nid]
         raw_card = node.to_l1_dict()
         # Strip pure-indexing / L2-only metadata and empty fields so L1 recall stays ultra-lean
@@ -401,6 +421,8 @@ def query_snapshot_recall(
                 continue
         results.append(card)
         used_tokens += cost
+        if q_terms_pack:
+            covered_terms |= q_terms_pack & extract_terms(node.rule + " " + " ".join(node.entities))
 
     return {
         "mode": mode,

@@ -212,22 +212,33 @@ class LexicalReranker:
     def rerank(self, query: str, docs: list[tuple[str, str]]) -> dict[str, float]:
         q_low = query.strip().lower()
         q_terms = extract_terms(query)
+        doc_terms: list[tuple[str, str, set[str]]] = [
+            (doc_id, text.lower(), extract_terms(text)) for doc_id, text in docs
+        ]
+        n_docs = max(1, len(doc_terms))
+        df: dict[str, int] = {}
+        for t in q_terms:
+            df[t] = sum(1 for _, _, dt in doc_terms if t in dt)
+        idf: dict[str, float] = {t: math.log((n_docs + 1.0) / (df[t] + 1.0)) + 1.0 for t in q_terms}
+        total_idf = sum(idf.values()) or 1.0
+
         scores: dict[str, float] = {}
-        for doc_id, text in docs:
-            t_low = text.lower()
-            d_terms = extract_terms(text)
+        for doc_id, t_low, d_terms in doc_terms:
             if not q_terms or not d_terms:
                 scores[doc_id] = 0.0
                 continue
             overlap = q_terms & d_terms
             prec = len(overlap) / len(d_terms)
-            rec = len(overlap) / len(q_terms)
-            f1 = (2 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
+            rec = sum(idf[t] for t in overlap) / total_idf
+            raw_rec = len(overlap) / len(q_terms)
+            f1 = (2 * prec * raw_rec / (prec + raw_rec)) if (prec + raw_rec) > 0 else 0.0
             phrase_bonus = 0.25 if (len(q_low) >= 4 and q_low in t_low) else 0.0
-            # Reward exact technical flags/identifiers (e.g. --mkpath, DEC-001)
+            # Reward rare exact query terms (e.g. 外键, shadcn, DataBuffer) & technical identifiers
+            rare_hits = sum(1 for t in overlap if df[t] <= 2 and len(t) >= 2)
+            rare_bonus = min(0.24, 0.12 * rare_hits)
             special_q = {t for t in q_terms if len(t) >= 4 and any(ch.isdigit() or ch in "-_" for ch in t)}
             special_bonus = 0.15 * len(special_q & d_terms) if special_q else 0.0
-            scores[doc_id] = min(1.0, 0.55 * rec + 0.30 * f1 + phrase_bonus + special_bonus)
+            scores[doc_id] = min(1.0, 0.55 * rec + 0.25 * f1 + phrase_bonus + rare_bonus + special_bonus)
         return scores
 
     def unload(self) -> None:
