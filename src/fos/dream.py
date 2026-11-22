@@ -77,7 +77,7 @@ For `hindsight:docs:*` entries (sourced from AGENTS.md / GEMINI.md / FRONTEND.md
 - Drop boilerplate repo commands (like `make dev`, `npm test` listings) or temporary setup steps that are not design principles or engineering rules.
 
 When keep = true (STRICT L1 TOKEN BUDGET — anti-context-rot):
-- `rule`: MAX 1-2 crisp sentences (**<= 65 tokens / ~80 Chinese chars**). Actionable, timeless, no ticket IDs, no raw dumps. Preserve ALL exact technical flags, negations (禁止/不要/必须/never/must), and durable technical constants!
+- `rule`: MAX 1-2 crisp sentences (**<= 65 tokens / ~80 Chinese chars**). Actionable, timeless, no ticket IDs, no raw dumps. Preserve ALL exact technical flags and durable technical constants; if the raw input contains ANY prohibition/negation (`禁止`/`不要`/`不得`/`避免`/`never`/`avoid`/`must not`/`do not`), `rule` MUST explicitly include a Chinese negation word (`禁止`/`不要`/`避免`/`不得`) so negative guardrails are never silently lost!
 - `rationale`: MAX 1 short sentence (**<= 35 tokens**): first-principles structural WHY.
 - `guard_hint`: MAX 1 short sentence (**<= 30 tokens**): mechanical lint/unit-test/CI check if enforceable, otherwise "".
 - `scope`: ALWAYS keep the input repo `scope` for any lesson mentioning repo/domain concepts (e.g. 渠道/供应商/适配器/金标用例/evidence_ids/具体接口). Use `"global"` ONLY for universal personal principles (`kind="principle"`) or OS/shell/git/engineering laws that apply identically to ANY repo with zero domain assumptions.
