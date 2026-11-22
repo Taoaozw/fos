@@ -254,6 +254,11 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode }: CardsPan
                             PINNED
                           </Badge>
                         )}
+                        {n.compat?.pattern === "code_exemplar" && (
+                          <Badge variant="secondary" className="rounded-md font-mono text-xs">
+                            pattern{n.compat.lang ? `:${n.compat.lang}` : ""}
+                          </Badge>
+                        )}
                       </div>
                       <div className="font-mono text-xs text-muted-foreground">
                         seen:{n.seen_count} · {(n.valid_from || "").slice(0, 10)}
@@ -433,6 +438,31 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode }: CardsPan
                     <div className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-foreground break-all">
                       {detailNode.source_ref}
                     </div>
+                  </div>
+                )}
+
+                {detailNode.compat && Object.keys(detailNode.compat).length > 0 && (
+                  <div className="flex flex-col gap-1.5">
+                    <div className="text-xs font-medium text-muted-foreground">
+                      框架版本包络 Compat Envelope (SemVer)
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {detailNode.compat.lang && (
+                        <Badge variant="outline" className="rounded-md font-mono text-xs">
+                          {detailNode.compat.lang}
+                        </Badge>
+                      )}
+                      {Object.entries(detailNode.compat.stack ?? {}).map(([k, v]) => (
+                        <Badge key={k} variant="secondary" className="rounded-md font-mono text-xs">
+                          {k} {v}
+                        </Badge>
+                      ))}
+                    </div>
+                    {detailNode.compat.bench_cmd && (
+                      <div className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-foreground break-all">
+                        verify: {detailNode.compat.bench_cmd}
+                      </div>
+                    )}
                   </div>
                 )}
 

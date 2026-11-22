@@ -42,10 +42,16 @@ def compute_doc_digest(path: Path) -> str:
 
 
 def parse_source_ref_path(source_ref: str) -> tuple[Path | None, str]:
-    """Split `/abs/path/file.md#section` into `(Path, section)` if it is a local file pointer."""
+    """Split `/abs/path/file.md#section` or `/abs/path/File.kt::Symbol` into `(Path, anchor)`."""
     ref = (source_ref or "").strip()
     if not ref or ref.startswith(("git:", "http://", "https://", "ledger:")):
         return None, ""
+    if "::" in ref:
+        path_part, _, symbol = ref.partition("::")
+        p = Path(path_part).expanduser()
+        if not p.is_absolute():
+            return None, symbol.strip()
+        return p, symbol.strip()
     path_part, _, anchor = ref.partition("#")
     p = Path(path_part).expanduser()
     if not p.is_absolute():
@@ -54,8 +60,24 @@ def parse_source_ref_path(source_ref: str) -> tuple[Path | None, str]:
 
 
 def check_source_freshness(source_ref: str, source_hash: str = "") -> FreshnessState:
-    """Deterministically verify whether a local `source_ref` file still exists and matches its hash."""
-    path, _anchor = parse_source_ref_path(source_ref)
+    """Deterministically verify whether a local `source_ref` doc or code symbol still exists and matches its hash."""
+    ref = (source_ref or "").strip()
+    if "::" in ref:
+        from fos.code_pattern import extract_code_symbol, parse_symbol_ref
+
+        sym_path, symbol = parse_symbol_ref(ref)
+        if sym_path is None:
+            return "untracked"
+        if not sym_path.is_file():
+            return "broken_ref"
+        extracted = extract_code_symbol(sym_path, symbol)
+        if not extracted.get("found"):
+            return "broken_ref"
+        if not source_hash:
+            return "fresh"
+        return "fresh" if extracted.get("hash") == source_hash else "drifted"
+
+    path, _anchor = parse_source_ref_path(ref)
     if path is None:
         return "untracked"
     if not path.is_file():
@@ -348,7 +370,8 @@ def evaluate_surprise(
             best_sim = sim
             best_node = node
         node_neg = bool(_NEG_POLARITY_RE.search(node.rule))
-        if (new_neg != node_neg) and (sim >= 0.40 or (sim >= 0.30 and len(shared_terms) >= 4)) and sim > conflict_sim:
+        is_same_topic = (cos >= 0.75) or (dice >= 0.35) or (max(cos, dice) >= 0.55 and len(shared_terms) >= 3)
+        if (new_neg != node_neg) and is_same_topic and sim > conflict_sim:
             conflict_sim = sim
             conflict_node = node
 

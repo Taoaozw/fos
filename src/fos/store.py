@@ -145,6 +145,7 @@ class SnapshotDB:
                 source_ref TEXT NOT NULL DEFAULT '',
                 source_hash TEXT NOT NULL DEFAULT '',
                 verified_at TEXT NOT NULL DEFAULT '',
+                compat_json TEXT NOT NULL DEFAULT '{}',
                 trigger_when_json TEXT NOT NULL DEFAULT '[]',
                 entities_json TEXT NOT NULL DEFAULT '[]',
                 contradicts_json TEXT NOT NULL DEFAULT '[]',
@@ -212,6 +213,8 @@ class SnapshotDB:
             cur.execute("ALTER TABLE nodes ADD COLUMN source_hash TEXT NOT NULL DEFAULT ''")
         if "verified_at" not in existing_cols:
             cur.execute("ALTER TABLE nodes ADD COLUMN verified_at TEXT NOT NULL DEFAULT ''")
+        if "compat_json" not in existing_cols:
+            cur.execute("ALTER TABLE nodes ADD COLUMN compat_json TEXT NOT NULL DEFAULT '{}'")
         self.conn.commit()
 
     def set_meta(self, key: str, value: str) -> None:
@@ -255,6 +258,7 @@ class SnapshotDB:
             source_ref=str(row["source_ref"]) if "source_ref" in keys else "",
             source_hash=str(row["source_hash"]) if "source_hash" in keys else "",
             verified_at=str(row["verified_at"]) if "verified_at" in keys else "",
+            compat=json.loads(row["compat_json"]) if "compat_json" in keys else {},
             trigger_when=json.loads(row["trigger_when_json"]),
             entities=json.loads(row["entities_json"]),
             contradicts=json.loads(row["contradicts_json"]),
@@ -264,6 +268,15 @@ class SnapshotDB:
         )
 
     def _node_search_blob(self, node: CompiledNode) -> str:
+        compat_terms: list[str] = []
+        if node.compat:
+            if node.compat.get("lang"):
+                compat_terms.append(str(node.compat["lang"]))
+            if node.compat.get("pattern"):
+                compat_terms.append(str(node.compat["pattern"]))
+            stack = node.compat.get("stack")
+            if isinstance(stack, dict):
+                compat_terms.extend(str(k) for k in stack.keys())
         parts = [
             node.id,
             node.scope,
@@ -273,6 +286,7 @@ class SnapshotDB:
             node.rationale,
             " ".join(node.trigger_when),
             " ".join(node.entities),
+            " ".join(compat_terms),
         ]
         return tokenize_for_fts(" ".join(p for p in parts if p))
 
@@ -289,9 +303,9 @@ class SnapshotDB:
                 id, type, scope, status, severity, valid_from, valid_until,
                 superseded_by, seen_count, seen_dates_json, confidence, l0, rule, rationale,
                 guard_hint, guard_pattern, graduated, source_ref, source_hash, verified_at,
-                trigger_when_json, entities_json, contradicts_json, evidence_ids_json,
+                compat_json, trigger_when_json, entities_json, contradicts_json, evidence_ids_json,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 node.id,
@@ -314,6 +328,7 @@ class SnapshotDB:
                 node.source_ref,
                 node.source_hash,
                 node.verified_at,
+                json.dumps(node.compat or {}, ensure_ascii=False),
                 json.dumps(node.trigger_when, ensure_ascii=False),
                 json.dumps(node.entities, ensure_ascii=False),
                 json.dumps(node.contradicts, ensure_ascii=False),

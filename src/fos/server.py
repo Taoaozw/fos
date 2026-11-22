@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from fos import __version__
+from fos.code_pattern import parse_stack_param
 from fos.config import FosConfig, hash_token, load_config
 from fos.dream import run_dream
 from fos.engine import BrainEngine
@@ -292,9 +293,19 @@ def create_app(
         as_of: str | None = Query(default=None),
         budget: int = Query(default=1200, ge=64, le=16000),
         limit: int = Query(default=20, ge=1, le=100),
+        cwd_stack: str | None = Query(default=None),
     ) -> dict[str, Any]:
         try:
-            return brain.recall(q, kind=kind, scope=scope, as_of=as_of, budget=budget, limit=limit)
+            stack_map = parse_stack_param(cwd_stack) if cwd_stack else None
+            return brain.recall(
+                q,
+                kind=kind,
+                scope=scope,
+                as_of=as_of,
+                budget=budget,
+                limit=limit,
+                cwd_stack=stack_map or None,
+            )
         except FosError as exc:
             raise _http_from_fos_error(exc) from exc
 

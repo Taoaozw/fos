@@ -264,13 +264,14 @@ def _apply_ttl_decay(
     for node in nodes:
         if node.status != "active":
             continue
-        # Protected forever: P0 redlines, principles, pinned golden nodes, recurring lessons (seen >= 2)
+        # Protected forever: P0 redlines, principles, pinned golden nodes, recurring lessons (seen >= 2), curated code exemplars
         if (
             node.severity == "P0"
             or node.type == "principle"
             or node.id in pinned_ids
             or node.seen_count >= 2
             or len(node.seen_dates) >= 2
+            or node.compat.get("pattern") == "code_exemplar"
         ):
             continue
 
@@ -628,6 +629,7 @@ def _compile_dream_nodes(
             source_ref=source_ref,
             source_hash=source_hash,
             verified_at=verified_at,
+            compat=dict(meta.get("compat") or {}),
             entities=entities,
             contradicts=list(meta.get("contradicts") or []),
             evidence_ids=[atom.id],

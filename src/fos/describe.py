@@ -299,6 +299,27 @@ COMMAND_SPECS: list[dict[str, Any]] = [
             {"name": "--json", "type": "bool", "default": "false", "desc": "JSON output"},
         ],
     },
+    {
+        "name": "pattern",
+        "aliases": ["pat"],
+        "readOnly": False,
+        "summary": "Store or inspect timeless high-performance code patterns (L1 invariant + symbol-anchored L2 skeleton + SemVer compat)",
+        "usage": 'fos pattern add <file[::symbol]> "<invariant>" [--why "..."] [--bench "..."] [--scope P] [--stack k=v,...] [--json] | fos pattern list [--scope P] [--json]',
+        "flags": [
+            {"name": "--why", "type": "string", "default": "", "desc": "first-principles rationale / performance benefit"},
+            {"name": "--bench", "type": "string", "default": "", "desc": "verification benchmark or test command"},
+            {"name": "--scope", "type": "string", "desc": "project scope (auto-detected from target file repo if omitted)"},
+            {"name": "--severity", "type": "string", "default": "P1", "desc": "P0|P1|P2 (default P1, keeps L0 boot lean)"},
+            {"name": "--kind", "type": "string", "default": "decision", "desc": "decision|lesson|principle"},
+            {"name": "--stack", "type": "string", "desc": "override/add SemVer stack versions (e.g. kotlin=2.4,spring-boot=4.1)"},
+            {"name": "--max-lines", "type": "int", "default": "45", "desc": "max skeleton lines stored in L2 ledger"},
+            {"name": "--json", "type": "bool", "default": "false", "desc": "JSON output"},
+        ],
+        "examples": [
+            'fos pattern add path/to/DetachableBody.kt::DetachableBody "WebFlux streaming relay uses lock-free BaseSubscriber<DataBuffer> zero-copy pass-through with upstream drain on disconnect" --why "Zero heap copy + accurate billing on client abort" --bench "./gradlew :services:gateway:test" --json',
+            "fos pattern list --json",
+        ],
+    },
 ]
 
 

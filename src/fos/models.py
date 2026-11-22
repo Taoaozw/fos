@@ -104,9 +104,10 @@ class CompiledNode:
     guard_hint: str = ""
     guard_pattern: str = ""  # Deterministic static guard (e.g. `cmd:mygo build -upload` or `path:*.tsx !components/ui :: <button\b`)
     graduated: bool = False  # True once mechanically enforced via CI/lint/fos guard (excluded from L0 boot)
-    source_ref: str = ""  # Authoritative pointer (e.g. /abs/path/docs/DESIGN.md#section or git:repo@sha)
-    source_hash: str = ""  # 16-char SHA-256 of authoritative source content at capture/verify time
+    source_ref: str = ""  # Authoritative pointer (e.g. /abs/path/docs/DESIGN.md#section or /abs/path/File.kt::Symbol)
+    source_hash: str = ""  # 16-char SHA-256 of authoritative source content/symbol at capture/verify time
     verified_at: str = ""  # YYYY-MM-DD when last verified against authoritative source
+    compat: dict[str, Any] = field(default_factory=dict)  # Optional code-pattern SemVer envelope (stack, lang, bench_cmd)
     entities: list[str] = field(default_factory=list)
     contradicts: list[str] = field(default_factory=list)
     evidence_ids: list[str] = field(default_factory=list)
@@ -136,6 +137,7 @@ class CompiledNode:
             "source_ref": self.source_ref,
             "source_hash": self.source_hash,
             "verified_at": self.verified_at,
+            "compat": dict(self.compat),
             "entities": list(self.entities),
             "contradicts": list(self.contradicts),
             "evidence_ids": list(self.evidence_ids),
@@ -171,6 +173,7 @@ class CompiledNode:
             source_ref=str(data.get("source_ref", "")),
             source_hash=str(data.get("source_hash", "")),
             verified_at=str(data.get("verified_at", "")),
+            compat=dict(data.get("compat") or {}),
             entities=list(data.get("entities") or []),
             contradicts=list(data.get("contradicts") or []),
             evidence_ids=list(data.get("evidence_ids") or []),

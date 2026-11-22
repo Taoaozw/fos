@@ -69,6 +69,13 @@ def _print_result(data: Any, *, as_json: bool, command: str, fields: str | None 
             )
             if item.get("rationale"):
                 print(f"      rationale: {item['rationale']}")
+            if item.get("source_ref"):
+                fresh_s = f" [{item['freshness']}]" if item.get("freshness") else ""
+                print(f"      source: {item['source_ref']}{fresh_s}")
+            cc = item.get("compat_check")
+            if isinstance(cc, dict) and cc.get("status") == "major_drift":
+                drifts = ", ".join(cc.get("drifts") or [])
+                print(f"      ⚠ compat major_drift ({drifts}): {cc.get('note', '')}")
         return
 
     if command == "mirror":
@@ -140,6 +147,23 @@ def _print_result(data: Any, *, as_json: bool, command: str, fields: str | None 
         else:
             note = f" ({data['note']})" if data.get("note") else ""
             print(f"fos is up to date: {data.get('local_version')}{note}")
+        return
+
+    if command == "pattern" and "patterns" in data:
+        print(f"Code Patterns (snap={data.get('snapshot_version')}, count={data.get('count', 0)})")
+        for it in data.get("patterns") or []:
+            compat = it.get("compat") or {}
+            stack = compat.get("stack") or {}
+            stack_s = ", ".join(f"{k}={v}" for k, v in sorted(stack.items()))
+            print(f"  - [{it['id']}|{it['severity']}|{it['scope']}|{it.get('freshness', 'untracked')}] {it['rule']}")
+            if it.get("source_ref"):
+                print(f"      source: {it['source_ref']}" + (f" ({stack_s})" if stack_s else ""))
+            if compat.get("bench_cmd"):
+                print(f"      verify: {compat['bench_cmd']}")
+            cc = it.get("compat_check")
+            if isinstance(cc, dict) and cc.get("status") in ("major_drift", "minor_drift"):
+                drifts = ", ".join(cc.get("drifts") or [])
+                print(f"      compat: {cc['status']} ({drifts})")
         return
 
     print(dumps_json(data, pretty=True))
@@ -328,6 +352,26 @@ def build_parser() -> _StrictArgumentParser:
     p_fb.add_argument("--context", type=str, default="", help="Optional feedback context note")
     p_fb.add_argument("--json", action="store_true")
 
+    # pattern (code exemplar memory)
+    p_pat = sub.add_parser(
+        "pattern",
+        aliases=["pat"],
+        help="Store or list timeless high-performance code patterns (L1 invariant + symbol-anchored L2 + SemVer compat)",
+    )
+    p_pat.add_argument("action", nargs="?", default="list", choices=["add", "list"])
+    p_pat.add_argument("target", nargs="?", default=None, help="File path with optional ::Symbol or ::Lstart-Lend (for add)")
+    p_pat.add_argument("rule", nargs="?", default=None, help="Concise timeless design invariant / optimization essence (for add)")
+    p_pat.add_argument("--why", dest="rationale", type=str, default="", help="First-principles structural rationale / perf benefit")
+    p_pat.add_argument("--bench", dest="bench_cmd", type=str, default="", help="Verification test/benchmark command")
+    p_pat.add_argument("--scope", type=str, default=None, help="Project scope (auto-detected from target repo if omitted)")
+    p_pat.add_argument("--severity", type=str, default="P1", choices=["P0", "P1", "P2"])
+    p_pat.add_argument("--kind", type=str, default="decision", choices=["decision", "lesson", "principle"])
+    p_pat.add_argument("--stack", type=str, default=None, help="Override/add compat stack versions, e.g. kotlin=2.4,spring-boot=4.1")
+    p_pat.add_argument("--entities", type=str, default=None, help="Comma-separated entity tags")
+    p_pat.add_argument("--trigger", action="append", default=None, help="Repeatable trigger_when phrase")
+    p_pat.add_argument("--max-lines", dest="max_lines", type=int, default=45, help="Max skeleton lines stored in L2 ledger")
+    p_pat.add_argument("--json", action="store_true")
+
     return parser
 
 
@@ -432,6 +476,9 @@ def run_cli(argv: list[str] | None = None) -> int:
                 _print_result(result, as_json=False, command="boot_hook")
                 return int(ExitCode.OK)
         elif cmd == "recall":
+            from fos.code_pattern import detect_repo_stack_versions
+
+            cwd_stack, _ = detect_repo_stack_versions(Path.cwd())
             result = client.recall(
                 args.query,
                 kind=args.kind,
@@ -439,6 +486,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 as_of=args.as_of,
                 budget=args.budget,
                 limit=args.limit,
+                cwd_stack=cwd_stack or None,
             )
         elif cmd == "get":
             result = client.get(args.node_id, tier=args.tier, include_graph=args.graph)
@@ -545,7 +593,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             else:
                 from fos.guard import load_git_diff
 
-                scope = args.scope or _detect_cwd_project()
+                scope = args.scope or _detect_git_project()
                 diff_text: str | None = None
                 if args.diff_source == "-":
                     diff_text = sys.stdin.read()
@@ -559,6 +607,34 @@ def run_cli(argv: list[str] | None = None) -> int:
         elif cmd == "feedback":
             verdict = "useful" if args.useful else "noise"
             result = client.feedback(args.node_id, verdict, context=args.context)
+        elif cmd == "pattern":
+            from fos.code_pattern import detect_repo_stack_versions, parse_stack_param
+
+            if args.action == "list":
+                cwd_stack, _ = detect_repo_stack_versions(Path.cwd())
+                result = client.list_patterns(scope=args.scope, cwd_stack=cwd_stack or None)
+            elif args.action == "add":
+                if not args.target or not args.rule:
+                    raise UsageError(
+                        'Usage: fos pattern add <file[::symbol]> "<timeless invariant>" [--why "..."] [--bench "..."]'
+                    )
+                entities = [e.strip() for e in args.entities.split(",") if e.strip()] if args.entities else None
+                stack_override = parse_stack_param(args.stack) if args.stack else None
+                result = client.add_pattern(
+                    args.target,
+                    args.rule,
+                    rationale=args.rationale,
+                    bench_cmd=args.bench_cmd,
+                    scope=args.scope,
+                    severity=args.severity,
+                    kind=args.kind,
+                    entities=entities,
+                    trigger_when=args.trigger,
+                    stack_override=stack_override,
+                    max_lines=args.max_lines,
+                )
+            else:
+                raise UsageError(f"Unknown pattern action: {args.action}")
         else:
             raise UsageError(f"Unknown command: {cmd}")
 

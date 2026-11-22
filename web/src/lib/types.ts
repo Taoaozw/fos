@@ -31,6 +31,13 @@ export interface CompiledNode {
   source_ref?: string
   source_hash?: string
   verified_at?: string
+  compat?: {
+    pattern?: string
+    lang?: string
+    stack?: Record<string, string>
+    manifest?: string
+    bench_cmd?: string
+  }
   freshness?: "fresh" | "drifted" | "broken_ref" | "untracked" | string
   recall_hits?: number
   useful_count?: number
@@ -105,6 +112,7 @@ export interface DashboardResponse {
     broken_ref_nodes: number
     guard_rules_count?: number
     graduated_nodes?: number
+    code_patterns_count?: number
   }
   utility?: {
     total_recall_hits: number

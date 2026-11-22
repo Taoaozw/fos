@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from fos.code_pattern import check_compat_drift
 from fos.config import FosConfig, ProviderConfig
 from fos.errors import NotFoundError, UsageError
 from fos.freshness import (
@@ -136,6 +137,13 @@ def extract_triggers(raw: str, scope: str, entities: list[str], meta_triggers: l
 
 
 def node_embedding_text(node: CompiledNode) -> str:
+    compat_parts: list[str] = []
+    if node.compat:
+        if node.compat.get("lang"):
+            compat_parts.append(str(node.compat["lang"]))
+        stack = node.compat.get("stack")
+        if isinstance(stack, dict):
+            compat_parts.extend(str(k) for k in stack.keys())
     return " | ".join(
         part
         for part in (
@@ -145,6 +153,7 @@ def node_embedding_text(node: CompiledNode) -> str:
             node.rationale,
             " ".join(node.trigger_when),
             " ".join(node.entities),
+            " ".join(compat_parts),
         )
         if part
     )
@@ -177,12 +186,13 @@ def query_snapshot_boot(
     prioritizes cross-project principles & P0 redlines over single-repo items.
     """
     raw_active = db.list_nodes(scope=project, as_of=None)
-    # Exclude low-priority P2 trivia, graduated mechanical guards, and broken-ref deleted-doc cards from wakeup kernel
+    # Exclude low-priority P2 trivia, graduated mechanical guards, non-P0 code exemplars, and broken-ref cards from L0 wakeup kernel
     active = [
         n
         for n in raw_active
         if (n.severity != "P2" or n.type == "principle")
         and not n.graduated
+        and not (n.compat.get("pattern") == "code_exemplar" and n.severity != "P0")
         and check_source_freshness(n.source_ref, n.source_hash) != "broken_ref"
     ]
     if project is None:
@@ -261,6 +271,7 @@ def query_snapshot_recall(
     limit: int = 20,
     mode: str = "online",
     usage_stats: dict[str, dict[str, Any]] | None = None,
+    cwd_stack: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Execute 4-way hybrid recall + RRF + Rerank + strict L1 token budget packing."""
     if kind and kind not in VALID_KINDS:
@@ -438,9 +449,14 @@ def query_snapshot_recall(
             and v is not None
             and v != ""
             and v != []
+            and v != {}
         }
         if fresh != "untracked":
             card["freshness"] = fresh
+        if node.compat and cwd_stack:
+            cc = check_compat_drift(node.compat, cwd_stack)
+            if cc is not None:
+                card["compat_check"] = cc
         card["score"] = round(score, 4)
         card["channels"] = channels.get(nid, [])
         cost = estimate_json_tokens(card)
@@ -713,11 +729,13 @@ class BrainEngine:
             rule = str(meta["rule"])
         if meta.get("rationale"):
             rationale = str(meta["rationale"])
-        entities = extract_entities(atom.raw, meta.get("entities"))
-        triggers = extract_triggers(atom.raw, atom.scope, entities, meta.get("trigger_when"))
+        entity_src = f"{rule} {rationale}" if (meta.get("rule") and meta.get("compat")) else atom.raw
+        entities = extract_entities(entity_src, meta.get("entities"))
+        triggers = extract_triggers(rule if meta.get("rule") else atom.raw, atom.scope, entities, meta.get("trigger_when"))
 
         source_ref, source_hash = resolve_legacy_source_ref(atom.scope or "global", atom.source, meta)
         verified_at = str(meta.get("verified_at") or (atom.ts[:10] if len(atom.ts) >= 10 else ""))
+        compat = dict(meta.get("compat") or {})
 
         node = CompiledNode(
             id=node_id,
@@ -745,6 +763,7 @@ class BrainEngine:
             source_ref=source_ref,
             source_hash=source_hash,
             verified_at=verified_at,
+            compat=compat,
             entities=entities,
             contradicts=list(meta.get("contradicts") or []),
             evidence_ids=[atom.id],
@@ -881,11 +900,12 @@ class BrainEngine:
                 existing_active = db.list_nodes(scope=None if scope_clean == "global" else scope_clean, as_of=None)
             same_bucket = [n for n in existing_active if n.scope == scope_clean and n.type == kind]
             if same_bucket:
-                texts = [raw_clean] + [n.rule for n in same_bucket]
+                probe_text = str(meta_clean.get("rule") or raw_clean)
+                texts = [probe_text] + [n.rule for n in same_bucket]
                 vecs = self.providers.embedder.embed(texts)
                 if len(vecs) == len(texts):
                     surprise_info = evaluate_surprise(
-                        raw_clean,
+                        probe_text,
                         vecs[0],
                         list(zip(same_bucket, vecs[1:])),
                     )
@@ -1079,6 +1099,7 @@ class BrainEngine:
         as_of: str | None = None,
         budget: int = 1200,
         limit: int = 20,
+        cwd_stack: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         usage = load_usage_stats(self.data_dir)
         with self.snapshots.open_current(read_only=True) as db:
@@ -1094,6 +1115,7 @@ class BrainEngine:
                 limit=limit,
                 mode="online",
                 usage_stats=usage,
+                cwd_stack=cwd_stack,
             )
         if as_of is None and res.get("results"):
             record_recall_hits(self.data_dir, [str(r["id"]) for r in res["results"] if r.get("id")])
@@ -1182,6 +1204,7 @@ class BrainEngine:
         broken_ref_nodes = 0
         guard_rules_count = 0
         graduated_nodes = 0
+        code_patterns_count = 0
 
         node_dicts: list[dict[str, Any]] = []
         for n in all_nodes:
@@ -1201,6 +1224,8 @@ class BrainEngine:
                     guard_rules_count += 1
                 if n.graduated:
                     graduated_nodes += 1
+                if n.compat.get("pattern") == "code_exemplar":
+                    code_patterns_count += 1
                 if fresh == "drifted":
                     drifted_nodes += 1
                 elif fresh == "broken_ref":
@@ -1257,6 +1282,7 @@ class BrainEngine:
                 "broken_ref_nodes": broken_ref_nodes,
                 "guard_rules_count": guard_rules_count,
                 "graduated_nodes": graduated_nodes,
+                "code_patterns_count": code_patterns_count,
             },
             "utility": utility_summary,
             "distributions": {

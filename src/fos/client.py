@@ -310,21 +310,49 @@ class FosClient:
         as_of: str | None = None,
         budget: int = 1200,
         limit: int = 20,
+        cwd_stack: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        from fos.code_pattern import format_stack_param
+
+        stack_param = format_stack_param(cwd_stack)
         if not self.is_remote:
             warm = self._try_local_daemon(
                 "GET",
                 "/v1/recall",
-                params={"q": query, "kind": kind, "scope": scope, "as_of": as_of, "budget": budget, "limit": limit},
+                params={
+                    "q": query,
+                    "kind": kind,
+                    "scope": scope,
+                    "as_of": as_of,
+                    "budget": budget,
+                    "limit": limit,
+                    "cwd_stack": stack_param,
+                },
             )
             if warm is not None:
                 return warm
-            return self._engine().recall(query, kind=kind, scope=scope, as_of=as_of, budget=budget, limit=limit)
+            return self._engine().recall(
+                query,
+                kind=kind,
+                scope=scope,
+                as_of=as_of,
+                budget=budget,
+                limit=limit,
+                cwd_stack=cwd_stack,
+            )
         try:
             return self._request(
                 "GET",
                 "/v1/recall",
-                params={"q": query, "kind": kind, "scope": scope, "as_of": as_of, "budget": budget, "limit": limit},
+                params={
+                    "q": query,
+                    "kind": kind,
+                    "scope": scope,
+                    "as_of": as_of,
+                    "budget": budget,
+                    "limit": limit,
+                    "cwd_stack": stack_param,
+                },
             )
         except OfflineError:
             with self._open_offline_cache() as db:
@@ -339,6 +367,7 @@ class FosClient:
                     budget=budget,
                     limit=limit,
                     mode="offline_cache",
+                    cwd_stack=cwd_stack,
                 )
 
     def get(self, node_id: str, *, tier: str = "L1", include_graph: bool = False) -> dict[str, Any]:
@@ -407,6 +436,9 @@ class FosClient:
         source_hash: str | None = None,
         verified_at: str | None = None,
         guard_pattern: str | None = None,
+        rule: str | None = None,
+        rationale: str | None = None,
+        compat: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if kind not in VALID_KINDS:
             raise UsageError(f"Invalid kind '{kind}'. Must be one of: {', '.join(VALID_KINDS)}")
@@ -432,8 +464,28 @@ class FosClient:
             meta["verified_at"] = verified_at
         if guard_pattern:
             meta["guard_pattern"] = guard_pattern
+        if rule:
+            meta["rule"] = rule
+        if rationale:
+            meta["rationale"] = rationale
+        if compat:
+            meta["compat"] = compat
 
         if not self.is_remote:
+            warm = self._try_local_daemon(
+                "POST",
+                "/v1/atoms",
+                json_body={
+                    "device": self.cfg.device,
+                    "kind": kind,
+                    "scope": scope,
+                    "source": source,
+                    "content": content,
+                    "meta": meta,
+                },
+            )
+            if warm is not None:
+                return warm
             return self._engine().add_atom(
                 kind=kind,
                 content=content,
@@ -855,3 +907,152 @@ class FosClient:
             f"/v1/nodes/{node_id}/feedback",
             json_body={"verdict": verdict, "context": context},
         )
+
+    def add_pattern(
+        self,
+        target: str,
+        rule: str,
+        *,
+        rationale: str = "",
+        bench_cmd: str = "",
+        scope: str | None = None,
+        severity: str = "P1",
+        kind: str = "decision",
+        entities: list[str] | None = None,
+        trigger_when: list[str] | None = None,
+        stack_override: dict[str, str] | None = None,
+        max_lines: int = 45,
+    ) -> dict[str, Any]:
+        """Capture a high-leverage code pattern: timeless L1 invariant + symbol-anchored L2 skeleton + SemVer compat."""
+        from fos.code_pattern import (
+            detect_repo_root,
+            detect_repo_stack_versions,
+            extract_code_symbol,
+        )
+
+        if not target or not target.strip():
+            raise UsageError("Target file[::symbol] is required.")
+        if not rule or not rule.strip():
+            raise UsageError("A concise timeless invariant/rule is required.")
+
+        raw_path, sep, symbol = target.strip().partition("::")
+        file_path = Path(raw_path).expanduser().resolve()
+        symbol = symbol.strip() if sep else ""
+        if not file_path.is_file():
+            raise NotFoundError(f"Source file not found: {file_path}")
+
+        extracted = extract_code_symbol(file_path, symbol, max_lines=max_lines)
+        if not extracted.get("found"):
+            raise NotFoundError(str(extracted.get("error") or f"Symbol '{symbol}' not found in {file_path.name}"))
+
+        repo_root = detect_repo_root(file_path)
+        detected_stack, manifest_rel = detect_repo_stack_versions(file_path)
+        stack = dict(detected_stack)
+        if stack_override:
+            stack.update(stack_override)
+
+        resolved_scope = (scope or (repo_root.name.lower() if repo_root else "global")).strip().lower()
+        source_ref = f"{file_path}::{symbol}" if symbol else str(file_path)
+
+        compat: dict[str, Any] = {
+            "pattern": "code_exemplar",
+            "lang": extracted["lang"],
+        }
+        if stack:
+            compat["stack"] = stack
+        if manifest_rel:
+            compat["manifest"] = manifest_rel
+        if bench_cmd.strip():
+            compat["bench_cmd"] = bench_cmd.strip()
+
+        # Compose clean verbatim L2 ledger payload (timeless essence + compact skeleton fallback)
+        l2_lines = [f"Invariant: {rule.strip()}"]
+        if rationale.strip():
+            l2_lines.append(f"Rationale: {rationale.strip()}")
+        if bench_cmd.strip():
+            l2_lines.append(f"Verify: {bench_cmd.strip()}")
+        l2_lines.append(f"Source: {source_ref} (L{extracted['start_line']}-L{extracted['end_line']})")
+        if stack:
+            l2_lines.append("Stack: " + ", ".join(f"{k}={v}" for k, v in sorted(stack.items())))
+        l2_lines.append("")
+        l2_lines.append(f"```{extracted['lang']}")
+        l2_lines.append(str(extracted["snippet"]))
+        l2_lines.append("```")
+
+        ent_list = list(entities or [])
+        if symbol and not symbol.upper().startswith("L"):
+            if symbol.lower() not in [e.lower() for e in ent_list]:
+                ent_list.append(symbol.lower())
+        for sk in stack:
+            if sk.lower() not in [e.lower() for e in ent_list]:
+                ent_list.append(sk.lower())
+
+        return self.add(
+            kind=kind,
+            content="\n".join(l2_lines),
+            scope=resolved_scope,
+            source="manual:pattern",
+            severity=severity,
+            entities=ent_list or None,
+            trigger_when=trigger_when,
+            source_ref=source_ref,
+            source_hash=str(extracted["hash"]),
+            verified_at=now_iso()[:10],
+            rule=rule.strip(),
+            rationale=rationale.strip(),
+            compat=compat,
+        )
+
+    def list_patterns(
+        self,
+        *,
+        scope: str | None = None,
+        cwd_stack: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """List active code exemplar cards with live symbol freshness and SemVer compat check."""
+        from fos.code_pattern import check_compat_drift
+        from fos.freshness import check_source_freshness
+
+        if not self.is_remote:
+            eng = self._engine()
+            with eng.snapshots.open_current(read_only=True) as db:
+                nodes = db.list_nodes(scope=scope, as_of=None)
+                snap_ver = db.get_meta("snapshot_version", "unknown")
+        else:
+            dash = self._request("GET", "/v1/dashboard", params={"ledger_limit": 1})
+            from fos.models import CompiledNode
+
+            nodes = [
+                CompiledNode.from_dict(nd)
+                for nd in (dash.get("nodes") or [])
+                if nd.get("status") == "active" and (not scope or nd.get("scope") in (scope, "global"))
+            ]
+            snap_ver = dash.get("snapshot_version")
+
+        items: list[dict[str, Any]] = []
+        for n in nodes:
+            if n.compat.get("pattern") != "code_exemplar":
+                continue
+            fresh = check_source_freshness(n.source_ref, n.source_hash)
+            cc = check_compat_drift(n.compat, cwd_stack) if cwd_stack else None
+            entry: dict[str, Any] = {
+                "id": n.id,
+                "type": n.type,
+                "scope": n.scope,
+                "severity": n.severity,
+                "rule": n.rule,
+                "rationale": n.rationale,
+                "source_ref": n.source_ref,
+                "freshness": fresh,
+                "compat": n.compat,
+            }
+            if cc is not None:
+                entry["compat_check"] = cc
+            items.append(entry)
+
+        return {
+            "snapshot_version": snap_ver,
+            "count": len(items),
+            "cwd_stack": cwd_stack or {},
+            "patterns": items,
+        }
