@@ -21,8 +21,10 @@ fos add --kind lesson --scope fops --severity P0 "Never use rsync --mkpath on ma
 fos add --kind decision --scope fos --supersedes DEC-001 "Use SQLite WAL + sqlite-vec" --json
 
 # Incremental hindsight extraction from local AI/tool traces (secret-redacted, cursor-tracked)
+fos ingest --from all --since 7d --json
 fos ingest --from claude --since 24h --json
 fos ingest --from codex --since 24h --json
+fos ingest --from pi --since 24h --json
 fos ingest --from antigravity --since 24h --json
 fos ingest --from fops --since 24h --json
 ```

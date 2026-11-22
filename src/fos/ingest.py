@@ -1,4 +1,4 @@
-"""Passive Hindsight collectors for Antigravity, Claude Code, Codex, and fops traces."""
+"""Passive Hindsight collectors for Antigravity, Claude Code, Codex, Pi, and fops traces."""
 
 from __future__ import annotations
 
@@ -12,21 +12,39 @@ from fos.errors import UsageError
 from fos.models import now_iso, parse_timestamp
 from fos.redact import redact_secrets
 
-VALID_SOURCES = ("antigravity", "claude", "codex", "fops")
+VALID_SOURCES = ("antigravity", "claude", "codex", "pi", "fops")
+ALL_SOURCES_ALIAS = "all"
 
-# Hindsight signal patterns: corrections, errors, retries, outcomes, explicit decisions
+# Hindsight signal patterns: corrections, concrete errors, explicit decisions
 _CORRECTION_RE = re.compile(
-    r"(?:不对|不是这样|不要用|禁止|别用|搞错了|纠正|记住|以后|下次|踩坑|应该用|改用|换成|"
-    r"actually|instead|wrong|don't use|never use|do not use|remember to|lesson learned|fix:|root cause)",
+    r"(?:不对|不是这样|不要用|禁止|别用|搞错了|纠正|记住|以后不要|下次不要|踩坑|应该用|改用|换成|不要再|"
+    r"actually\b|instead of\b|wrong\b|don't use\b|never use\b|do not use\b|remember to\b|lesson learned|root cause)",
     re.IGNORECASE,
 )
 _ERROR_RE = re.compile(
-    r"(?:traceback|exception|error:|exit code [1-9]|exited with code [1-9]|failed|fatal:|unsupported|not found|permission denied|报错|失败|中断)",
+    r"(?:traceback \(most recent|exception:|exit code [1-9]|exited with code [1-9]|fatal:|"
+    r"unrecognized option|unknown option|permission denied|econnrefused|command failed|报错|失败中断)",
     re.IGNORECASE,
 )
 _DECISION_RE = re.compile(
-    r"(?:决定|选择|定稿|采用|选型|架构方案|放弃.*改用|decided to|we will use|chosen|architecture decision)",
+    r"(?:决定|最终选择|选型|架构方案|放弃.*改用|改用.*替代|统一用|一律用|"
+    r"decided to\b|we will use\b|architecture decision|chosen to\b)",
     re.IGNORECASE,
+)
+
+# Wrapper / injected boilerplate stripping so system instructions never pollute hindsight
+_USER_REQUEST_RE = re.compile(r"<USER_REQUEST>\s*([\s\S]*?)\s*</USER_REQUEST>", re.IGNORECASE)
+_BOILERPLATE_BLOCK_RE = re.compile(
+    r"<(?:system-reminder|environment_context|permissions instructions|ADDITIONAL_METADATA|SYSTEM_MESSAGE|"
+    r"USER_SETTINGS_CHANGE|command-message|local-command-stdout|local-command-caveat|INSTRUCTIONS)[^>]*>[\s\S]*?</[^>]+>",
+    re.IGNORECASE,
+)
+_NOISE_PREFIXES = (
+    "[image:",
+    "# agents.md instructions",
+    "<environment_context>",
+    "another claude session",
+    "base directory for this skill:",
 )
 
 
@@ -50,15 +68,30 @@ def parse_since_duration(since: str | None) -> datetime | None:
     return parse_timestamp(since)
 
 
+def _strip_boilerplate(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = _BOILERPLATE_BLOCK_RE.sub("", text).strip()
+    low = cleaned.lower()
+    for pref in _NOISE_PREFIXES:
+        if low.startswith(pref):
+            return ""
+    # Skip pasted massive prompts / multi-KB code dumps that are not concise hindsight
+    if len(cleaned) > 3000:
+        return ""
+    return cleaned
+
+
 def _classify_hindsight(text: str, *, is_error_event: bool = False) -> tuple[str, str] | None:
     """Return (kind, severity) if text carries hindsight signal, else None (drops chatter)."""
-    clean = text.strip()
-    if len(clean) < 18:
+    clean = _strip_boilerplate(text)
+    if len(clean) < 16:
         return None
     if is_error_event or _ERROR_RE.search(clean):
         return ("lesson", "P1")
     if _CORRECTION_RE.search(clean):
-        return ("lesson", "P0" if any(w in clean.lower() for w in ("禁止", "严禁", "never", "must not")) else "P1")
+        sev = "P0" if any(w in clean.lower() for w in ("禁止", "严禁", "never use", "must not")) else "P1"
+        return ("lesson", sev)
     if _DECISION_RE.search(clean):
         return ("decision", "P1")
     return None
@@ -77,9 +110,10 @@ def _extract_text_from_message(msg: Any) -> str:
                 if isinstance(block, str):
                     parts.append(block)
                 elif isinstance(block, dict):
-                    if block.get("type") == "text" and block.get("text"):
+                    btype = block.get("type")
+                    if btype in ("text", "input_text", "output_text") and block.get("text"):
                         parts.append(str(block["text"]))
-                    elif block.get("type") == "tool_result" and block.get("is_error"):
+                    elif btype == "tool_result" and block.get("is_error"):
                         parts.append(f"Tool error: {block.get('content', '')}")
             return "\n".join(parts)
     return ""
@@ -90,7 +124,7 @@ def _infer_scope_from_path(path_str: str) -> str:
         return "global"
     p = Path(path_str)
     name = p.name.strip()
-    if name and name not in ("/", ".", "Users", "home"):
+    if name and name not in ("/", ".", "Users", "home", "clive"):
         return name.lower()
     return "global"
 
@@ -120,8 +154,25 @@ def collect_hindsight_events(
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     """Scan local AI/tool traces and extract hindsight-bearing events (secret-redacted)."""
+    if source == ALL_SOURCES_ALIAS:
+        all_events: list[dict[str, Any]] = []
+        per_src_limit = max(1, limit)
+        for src in VALID_SOURCES:
+            all_events.extend(
+                collect_hindsight_events(
+                    src,
+                    since=since,
+                    root_dir=None,
+                    cursor_path=cursor_path,
+                    limit=per_src_limit,
+                )
+            )
+        return all_events
+
     if source not in VALID_SOURCES:
-        raise UsageError(f"Invalid ingest source '{source}'. Must be one of: {', '.join(VALID_SOURCES)}")
+        raise UsageError(
+            f"Invalid ingest source '{source}'. Must be one of: {', '.join(VALID_SOURCES)}, all"
+        )
 
     cutoff = parse_since_duration(since)
     cursors = _load_cursors(cursor_path) if cursor_path else {}
@@ -129,16 +180,19 @@ def collect_hindsight_events(
 
     if source == "antigravity":
         base = root_dir or (Path.home() / ".gemini" / "antigravity" / "brain")
-        files = sorted(base.glob("*/.system_generated/logs/transcript.jsonl")) if base.exists() else []
+        files = sorted(base.glob("*/.system_generated/logs/transcript.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True) if base.exists() else []
     elif source == "claude":
         base = root_dir or (Path.home() / ".claude" / "projects")
-        files = sorted(base.glob("*/*.jsonl")) if base.exists() else []
+        files = sorted(base.glob("*/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True) if base.exists() else []
     elif source == "codex":
         base = root_dir or (Path.home() / ".codex" / "sessions")
-        files = sorted(base.glob("**/*.jsonl")) if base.exists() else []
+        files = sorted(base.glob("**/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True) if base.exists() else []
+    elif source == "pi":
+        base = root_dir or (Path.home() / ".pi" / "agent" / "sessions")
+        files = sorted(base.glob("**/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True) if base.exists() else []
     else:  # fops
         base = root_dir or (Path.home() / ".fops")
-        files = sorted(base.glob("**/*.jsonl")) if base.exists() else []
+        files = sorted(base.glob("**/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True) if base.exists() else []
 
     for fpath in files:
         if len(events) >= limit:
@@ -154,46 +208,63 @@ def collect_hindsight_events(
         start_line = cursors.get(key, 0)
         last_line = start_line
         prev_context = ""
+        session_scope = "global"
+        session_id_hint = fpath.stem
 
         try:
             with fpath.open("r", encoding="utf-8", errors="replace") as fh:
                 for line_no, line in enumerate(fh, start=1):
+                    line_s = line.strip()
+                    if not line_s:
+                        continue
+                    try:
+                        obj = json.loads(line_s)
+                    except json.JSONDecodeError:
+                        continue
+
+                    # Track session-level cwd/id metadata even on skipped lines
+                    if source == "codex" and obj.get("type") in ("session_meta", "turn_context"):
+                        p = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+                        if p.get("cwd"):
+                            session_scope = _infer_scope_from_path(str(p["cwd"]))
+                        if p.get("id"):
+                            session_id_hint = str(p["id"])
+                    elif source == "pi" and obj.get("type") == "session":
+                        if obj.get("cwd"):
+                            session_scope = _infer_scope_from_path(str(obj["cwd"]))
+                        if obj.get("id"):
+                            session_id_hint = str(obj["id"])
+
                     if line_no <= start_line:
                         continue
                     last_line = line_no
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
 
                     ts = str(obj.get("created_at") or obj.get("timestamp") or obj.get("ts") or now_iso())
                     ts_dt = parse_timestamp(ts)
                     if cutoff is not None and ts_dt is not None and ts_dt < cutoff:
                         continue
 
-                    extracted = _extract_record_by_source(source, obj, fpath)
+                    extracted = _extract_record_by_source(source, obj, fpath, session_scope, session_id_hint)
                     if extracted is None:
                         continue
                     role, text, scope, is_err, session_id = extracted
-                    if not text:
+                    clean_text = _strip_boilerplate(text)
+                    if not clean_text:
                         continue
 
                     if role in ("assistant", "action"):
-                        prev_context = text[:240]
+                        prev_context = clean_text[:200]
                         if not is_err:
                             continue
 
-                    verdict = _classify_hindsight(text, is_error_event=is_err)
+                    verdict = _classify_hindsight(clean_text, is_error_event=is_err)
                     if verdict is None:
                         if role == "user":
-                            prev_context = text[:240]
+                            prev_context = clean_text[:200]
                         continue
 
                     kind, severity = verdict
-                    combined = f"Context: {prev_context}\nHindsight: {text[:600]}" if prev_context else text[:600]
+                    combined = f"Context: {prev_context}\nHindsight: {clean_text[:500]}" if prev_context else clean_text[:500]
                     red = redact_secrets(combined)
                     events.append(
                         {
@@ -228,6 +299,8 @@ def _extract_record_by_source(
     source: str,
     obj: dict[str, Any],
     fpath: Path,
+    session_scope: str,
+    session_id_hint: str,
 ) -> tuple[str, str, str, bool, str] | None:
     """Normalize a single log line into (role, text, scope, is_error, session_id)."""
     if source == "antigravity":
@@ -236,11 +309,17 @@ def _extract_record_by_source(
         content = str(obj.get("content") or "")
         session_id = fpath.parent.parent.parent.name
         if rtype == "USER_INPUT":
-            return ("user", content, "global", False, session_id)
+            # Extract real user prompt inside <USER_REQUEST> if wrapped; skip pure <SYSTEM_MESSAGE>
+            if "<USER_REQUEST>" in content:
+                m = _USER_REQUEST_RE.search(content)
+                content = m.group(1).strip() if m else ""
+            elif "<SYSTEM_MESSAGE>" in content:
+                return None
+            return ("user", content, session_scope, False, session_id)
         if rtype == "PLANNER_RESPONSE":
-            return ("assistant", content, "global", status == "ERROR", session_id)
+            return ("assistant", content, session_scope, status == "ERROR", session_id)
         if status == "ERROR" and content:
-            return ("tool", content, "global", True, session_id)
+            return ("tool", content, session_scope, True, session_id)
         return None
 
     if source == "claude":
@@ -259,13 +338,43 @@ def _extract_record_by_source(
     if source == "codex":
         rtype = str(obj.get("type", ""))
         payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else obj
-        session_id = str(payload.get("id") or fpath.stem)
-        scope = _infer_scope_from_path(str(payload.get("cwd") or ""))
-        if rtype in ("response_item", "event_msg", "message"):
+        session_id = str(payload.get("id") or session_id_hint)
+        scope = _infer_scope_from_path(str(payload.get("cwd") or "")) if payload.get("cwd") else session_scope
+        if rtype == "response_item":
+            ptype = str(payload.get("type", ""))
+            role = str(payload.get("role") or "")
+            if ptype == "message" and role in ("user", "assistant"):
+                text = _extract_text_from_message(payload) or str(payload.get("text") or "")
+                return (role, text, scope, False, session_id)
+            if ptype == "" and role in ("user", "assistant"):
+                text = _extract_text_from_message(payload) or str(payload.get("text") or "")
+                is_err = bool(payload.get("exit_code") not in (None, 0) or payload.get("is_error"))
+                return (role, text, scope, is_err, session_id)
+        elif rtype in ("event_msg", "message"):
             role = str(payload.get("role") or "user")
+            if role == "developer":
+                return None
             text = _extract_text_from_message(payload) or str(payload.get("text") or payload.get("message") or "")
             is_err = bool(payload.get("exit_code") not in (None, 0) or payload.get("is_error"))
             return (role, text, scope, is_err, session_id)
+        return None
+
+    if source == "pi":
+        if obj.get("type") != "message":
+            return None
+        msg = obj.get("message")
+        if not isinstance(msg, dict):
+            return None
+        role = str(msg.get("role") or "")
+        if role == "system":
+            return None
+        text = _extract_text_from_message(msg)
+        if role == "toolResult":
+            if not msg.get("isError"):
+                return None
+            return ("tool", text, session_scope, True, session_id_hint)
+        if role in ("user", "assistant"):
+            return (role, text, session_scope, False, session_id_hint)
         return None
 
     # fops structured trajectory jsonl

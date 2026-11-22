@@ -90,7 +90,25 @@ def test_ingest_collectors_filter_chatter_redact_and_track_cursors(tmp_path: Pat
     assert len(cx_events) == 1
     assert cx_events[0]["scope"] == "fos"
 
-    # 4. fops trajectory jsonl
+    # 4. pi session jsonl
+    pi_log = tmp_path / "pi" / "proj" / "sess.jsonl"
+    pi_log.parent.mkdir(parents=True)
+    pi_log.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session", "id": "pi-1", "cwd": "/Users/clive/project/zhijiang", "timestamp": ts}),
+                json.dumps({"type": "message", "timestamp": ts, "message": {"role": "assistant", "content": [{"type": "text", "text": "Opening page"}]}}),
+                json.dumps({"type": "message", "timestamp": ts, "message": {"role": "toolResult", "isError": True, "content": [{"type": "text", "text": "Error: page.goto failed with ECONNREFUSED"}]}}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    pi_events = collect_hindsight_events("pi", since="24h", root_dir=tmp_path / "pi", cursor_path=cursor_path)
+    assert len(pi_events) == 1
+    assert pi_events[0]["scope"] == "zhijiang"
+
+    # 5. fops trajectory jsonl
     fops_log = tmp_path / "fops" / "runs.jsonl"
     fops_log.parent.mkdir(parents=True)
     fops_log.write_text(
