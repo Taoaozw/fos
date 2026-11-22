@@ -45,6 +45,12 @@ _NOISE_PREFIXES = (
     "<environment_context>",
     "another claude session",
     "base directory for this skill:",
+    "created at:",
+)
+_NOISE_SUBSTRINGS = (
+    "encountered error in step execution: file does not exist",
+    "the user doesn't want to proceed with this tool use",
+    "the tool call was rejected by the user",
 )
 
 
@@ -75,6 +81,9 @@ def _strip_boilerplate(text: str) -> str:
     low = cleaned.lower()
     for pref in _NOISE_PREFIXES:
         if low.startswith(pref):
+            return ""
+    for sub in _NOISE_SUBSTRINGS:
+        if sub in low:
             return ""
     # Skip pasted massive prompts / multi-KB code dumps that are not concise hindsight
     if len(cleaned) > 3000:

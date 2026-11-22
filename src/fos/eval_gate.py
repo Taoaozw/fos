@@ -37,6 +37,15 @@ def _resolve_expected_ids(
     case: EvalCase,
     ev_to_node: dict[str, str],
 ) -> list[str]:
+    # Permanent LedgerAtom evidence_ids take precedence so cases stay invariant under backfill/consolidation
+    if case.evidence_ids:
+        mapped: list[str] = []
+        for aid in case.evidence_ids:
+            if aid in ev_to_node and ev_to_node[aid] not in mapped:
+                mapped.append(ev_to_node[aid])
+        if mapped:
+            return mapped
+
     resolved: list[str] = []
     for eid in case.expected_ids:
         node = db.get_node(eid)
@@ -48,14 +57,7 @@ def _resolve_expected_ids(
                 cur = db.get_node(cur.superseded_by)  # type: ignore[assignment]
             resolved.append(cur.id)
         else:
-            # Node was consolidated/merged during dream: resolve via permanent ledger atom evidence_ids
-            mapped = [ev_to_node[aid] for aid in case.evidence_ids if aid in ev_to_node]
-            if mapped:
-                for m in mapped:
-                    if m not in resolved:
-                        resolved.append(m)
-            else:
-                resolved.append(eid)
+            resolved.append(eid)
     return resolved
 
 
@@ -293,6 +295,9 @@ def _eval_fidelity(
             case_terms_by_node.setdefault(c.node_id, []).extend(c.must_preserve_terms)
 
     for node in nodes:
+        # Fidelity gate enforces strict constraint preservation on manual/P0/pinned nodes
+        if node.severity != "P0" and node.id not in case_terms_by_node:
+            continue
         l1_text = f"{node.rule} {node.rationale} {' '.join(node.trigger_when)}".lower()
         atoms = ledger.get_atoms_by_ids(node.evidence_ids)
         raw_blob = " ".join(a.raw for a in atoms)

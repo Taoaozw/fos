@@ -12,7 +12,7 @@ from fos.redact import redact_secrets
 from fos.ulid import new_atom_id, new_ulid
 
 _CONSTRAINT_RE = re.compile(
-    r"(?:禁止|不要|必须|严禁|不能|不支持|never|must|do not|don't|avoid|--[a-z0-9-]+|\b\d+(?:\.\d+)?(?:ms|s|gb|mb|%|x)?\b)",
+    r"(?:禁止|不要|必须|严禁|不能|不支持|never|must|do not|don't|avoid|--[a-z0-9-]+|\b\d+(?:\.\d+)?(?:ms|s|gb|mb|kb|%|x)\b)",
     re.IGNORECASE,
 )
 
@@ -147,14 +147,16 @@ class LedgerStore:
         *,
         superseded_node: CompiledNode | None = None,
         pinned: bool = False,
+        source: str = "manual",
     ) -> list[EvalCase]:
-        """Auto-synthesize 1-2 regression assertions for high-value lessons/decisions."""
+        """Auto-synthesize 1-2 regression assertions for high-value manual/P0 lessons & decisions."""
         created: list[EvalCase] = []
         existing = self.load_eval_cases()
         existing_pairs = {(c.suite, c.node_id, c.query) for c in existing}
 
-        # 1. Recall + Fidelity case for P0/P1 lessons, decisions, principles
-        if node.type in ("lesson", "decision", "principle") and (
+        is_curated = (source == "manual") or pinned or (node.severity == "P0")
+        # 1. Recall + Fidelity case for curated P0/P1 lessons, decisions, principles
+        if is_curated and node.type in ("lesson", "decision", "principle") and (
             node.severity in ("P0", "P1") or pinned
         ):
             query = (

@@ -628,7 +628,7 @@ class BrainEngine:
             )
 
         if synthesize_eval:
-            self.ledger.synthesize_cases_for_node(node, superseded_node=superseded_node)
+            self.ledger.synthesize_cases_for_node(node, superseded_node=superseded_node, source=atom.source)
 
         return node, superseded_node
 
