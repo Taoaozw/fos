@@ -264,7 +264,8 @@ class FosClient:
             return None
         if os.environ.get("FOS_NO_LOCAL_DAEMON") == "1":
             return None
-        if self.home != default_fos_home():
+        resolved_home = (self.home or default_fos_home()).resolve()
+        if resolved_home != default_fos_home():
             return None
         # Only worthwhile when a heavy embedder (e.g. mlx) is configured
         if self.cfg.providers.embedder == "local_hash":
@@ -275,7 +276,7 @@ class FosClient:
         headers: dict[str, str] = {"Accept": "application/json"}
         tok = self.cfg.token
         if not tok:
-            tok_file = self.home / ".initial_client_token"
+            tok_file = resolved_home / ".initial_client_token"
             if tok_file.is_file():
                 try:
                     tok = tok_file.read_text(encoding="utf-8").strip()
