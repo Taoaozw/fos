@@ -28,7 +28,7 @@ from fos.engine import BrainEngine, build_l0_line, node_embedding_text
 from fos.errors import ExitCode, FosError, NotFoundError, UsageError
 from fos.models import CompiledNode, VALID_KINDS, normalize_severity, now_iso, parse_timestamp
 from fos.providers import HeuristicReasoner, Reasoner
-from fos.tokens import estimate_tokens as count_tokens, tokenize_for_fts
+from fos.tokens import estimate_tokens as count_tokens, tokenize_for_fts, truncate_to_tokens
 from fos.ulid import new_ulid
 
 
@@ -695,7 +695,8 @@ def _estimate_l0_delta(
         return 0
     if kind == "retire_stale":
         return -sum(count_tokens(n.l0 or build_l0_line(n)) for n in target_nodes if n.severity == "P0")
-    new_l0 = count_tokens(f"[PRN-NEW|{proposed_severity}|seen:1] {proposed_rule[:80]}") if proposed_severity == "P0" else 0
+    summary = truncate_to_tokens(proposed_rule.replace("\n", " ").strip(), 22)
+    new_l0 = count_tokens(f"[PRN-NEW|{proposed_severity}|seen:1] {summary}") if proposed_severity == "P0" else 0
     if kind == "merge_dedup":
         old_l0 = sum(count_tokens(n.l0 or build_l0_line(n)) for n in target_nodes if n.scope == "global" and n.severity == "P0")
         return new_l0 - old_l0
