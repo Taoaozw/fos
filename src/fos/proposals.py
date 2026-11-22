@@ -488,16 +488,15 @@ def find_cross_repo_clusters(
     ]
     tok_map = {n.id: _meaningful_tokens(n) for n in scoped}
 
-    # Build adjacency across DIFFERENT scopes
+    # Build adjacency across DIFFERENT scopes (avoid loose CJK bigram chaining)
     adj: dict[str, set[str]] = defaultdict(set)
     for i in range(len(scoped)):
         for j in range(i + 1, len(scoped)):
             a, b = scoped[i], scoped[j]
             if a.scope == b.scope:
                 continue
-            shared = tok_map[a.id] & tok_map[b.id]
             sim = _node_similarity(a, b, emb_map, tok_map)
-            if sim >= 0.24 or len(shared) >= 4:
+            if sim >= 0.36:
                 adj[a.id].add(b.id)
                 adj[b.id].add(a.id)
 
@@ -557,9 +556,8 @@ def find_global_overlap_clusters(
             a, b = globals_[i], globals_[j]
             if a.type != b.type:
                 continue
-            shared = tok_map[a.id] & tok_map[b.id]
             sim = _node_similarity(a, b, emb_map, tok_map)
-            if sim >= 0.28 or len(shared) >= 5:
+            if sim >= 0.40:
                 adj[a.id].add(b.id)
                 adj[b.id].add(a.id)
 
@@ -903,10 +901,18 @@ def scan_proposals(
         for n in active_nodes
         if n.scope == "global"
     ]
+    repo_rules_sample = [
+        {"id": n.id, "scope": n.scope, "type": n.type, "severity": n.severity, "rule": n.rule[:180]}
+        for n in sorted(
+            (x for x in active_nodes if x.scope != "global" and (cluster_scopes is None or x.scope.lower() in cluster_scopes)),
+            key=lambda x: (x.severity, x.scope, x.id),
+        )[:40]
+    ]
 
     signal_payload = {
         "existing_globals": existing_globals,
         "cross_repo_clusters": cross_clusters,
+        "repo_rules_sample": repo_rules_sample,
         "recurring_manifests": recurring_manifests,
         "global_overlaps": global_overlaps,
         "stale_candidates": stale_candidates,
@@ -917,6 +923,7 @@ def scan_proposals(
 
     # Stage 2: Reasoner synthesis with incremental cache
     active_reasoner = reasoner or engine.providers.reasoner
+    reasoner_label = getattr(active_reasoner, "model_name", getattr(active_reasoner, "name", "heuristic"))
     cache = store.load_cache()
     used_cache = False
     raw_items: list[dict[str, Any]] | None = None
@@ -935,7 +942,7 @@ def scan_proposals(
             store.save_cache(
                 {
                     "signal_hash": signal_hash,
-                    "reasoner": getattr(active_reasoner, "name", "llm"),
+                    "reasoner": reasoner_label,
                     "updated_at": now_iso(),
                     "raw_items": raw_items,
                 }
@@ -1050,7 +1057,7 @@ def scan_proposals(
         "recurring_stack_tags": recurring_manifests,
         "cross_repo_clusters": len(cross_clusters),
         "global_overlap_clusters": len(global_overlaps),
-        "reasoner": getattr(active_reasoner, "name", "heuristic"),
+        "reasoner": reasoner_label,
         "cache_hit": used_cache,
         "expired": expired_count,
         "created": len(created),
