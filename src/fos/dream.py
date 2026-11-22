@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,7 @@ from fos.models import (
     LedgerAtom,
     normalize_severity,
     now_iso,
+    parse_timestamp,
 )
 from fos.providers import Reasoner, build_providers
 from fos.store import SnapshotDB
@@ -37,6 +40,22 @@ _NOISE_PATTERNS = (
 )
 _PROMOTE_SEEN_THRESHOLD = 3
 _DISTILL_BATCH_SIZE = 10
+DEFAULT_TTL_THOUGHT_DAYS = 30
+DEFAULT_TTL_P2_DAYS = 60
+DEFAULT_TTL_P1_DAYS = 180
+
+_REFLECT_SYSTEM_PROMPT = """You are FlowOS's Sleep-Time Self-Correction & Pruning Auditor.
+Review the currently active compiled memory cards and emit ONLY high-confidence maintenance actions:
+1. `supersede`: when two active cards contradict each other, OR a newer/clearer card strictly subsumes an older/redundant card. Specify `winner_id` and `loser_id`.
+2. `archive`: ONLY when a card is clearly obsolete, self-contradicted, or pure leftover noise that fails the 6-month half-life test.
+
+Rules:
+- Be conservative: if all cards are clean, distinct, and still valid, return `{"actions": []}`.
+- Never invent new IDs; only reference IDs present in the input list.
+- Never archive a core P0 principle unless it is strictly superseded by a newer P0 principle.
+
+Return STRICT JSON:
+{"actions": [{"action": "supersede", "winner_id": "...", "loser_id": "...", "reason": "..."}, {"action": "archive", "target_id": "...", "reason": "..."}]}"""
 
 _DISTILL_SYSTEM_PROMPT = """You are FlowOS's First-Principles Cognitive Distiller (modeled on fops LESSONS.md + Songe + Hindsight).
 Apply the STRICT **6-Month Half-Life Test**: "Will this knowledge still prevent a real engineering mistake or steer a real design decision 6 months from now?"
@@ -68,7 +87,7 @@ def _is_low_signal_noise(atom: LedgerAtom) -> bool:
     raw = atom.raw.strip()
     if len(raw) < 4:
         return True
-    if atom.source == "manual":
+    if atom.source.startswith("manual"):
         return False
     return any(p.match(raw) for p in _NOISE_PATTERNS)
 
@@ -128,7 +147,7 @@ def _distill_hindsight_batch(
     pending: list[LedgerAtom] = []
 
     for atom in atoms:
-        if atom.source == "manual":
+        if atom.source.startswith("manual"):
             continue
         ckey = f"{atom.id}@{reasoner.model_name}"
         if ckey in cache:
@@ -195,6 +214,168 @@ def _distill_hindsight_batch(
     return results, stats
 
 
+def _pinned_node_ids(engine: BrainEngine) -> set[str]:
+    pinned: set[str] = set()
+    for case in engine.ledger.load_eval_cases():
+        if case.pinned:
+            if case.node_id:
+                pinned.add(case.node_id)
+            pinned.update(case.expected_ids)
+    return pinned
+
+
+def _apply_ttl_decay(
+    nodes: list[CompiledNode],
+    *,
+    pinned_ids: set[str],
+    now_dt: datetime | None = None,
+    ttl_thought_days: int = DEFAULT_TTL_THOUGHT_DAYS,
+    ttl_p2_days: int = DEFAULT_TTL_P2_DAYS,
+    ttl_p1_days: int = DEFAULT_TTL_P1_DAYS,
+) -> int:
+    """Deterministic half-life expiration: archive stale single-sighting low-priority nodes."""
+    ref = now_dt or datetime.now(timezone.utc)
+    ref_iso = ref.isoformat(timespec="seconds")
+    archived_count = 0
+
+    for node in nodes:
+        if node.status != "active":
+            continue
+        # Protected forever: P0 redlines, principles, pinned golden nodes, recurring lessons (seen >= 2)
+        if (
+            node.severity == "P0"
+            or node.type == "principle"
+            or node.id in pinned_ids
+            or node.seen_count >= 2
+            or len(node.seen_dates) >= 2
+        ):
+            continue
+
+        anchor = parse_timestamp(node.updated_at or node.valid_from)
+        if anchor is None:
+            continue
+        age_days = (ref - anchor).total_seconds() / 86400.0
+
+        limit_days: int | None = None
+        if node.type in ("thought", "outcome"):
+            limit_days = ttl_thought_days
+        elif node.severity == "P2":
+            limit_days = ttl_p2_days
+        elif node.severity == "P1":
+            limit_days = ttl_p1_days
+
+        if limit_days is not None and age_days > limit_days:
+            node.status = "archived"
+            node.valid_until = ref_iso
+            tag = f"[expired: >{limit_days}d without recurrence]"
+            node.rationale = f"{node.rationale} {tag}".strip() if node.rationale else tag
+            archived_count += 1
+
+    return archived_count
+
+
+def _reflect_active_nodes(
+    nodes_by_id: dict[str, CompiledNode],
+    edges: list[GraphEdge],
+    reasoner: Reasoner,
+    cache_path: Path,
+    *,
+    pinned_ids: set[str],
+) -> dict[str, int]:
+    """Sleep-time LLM reflection pass: detect contradictions, subsumed duplicates, and obsolete nodes."""
+    rstats = {"reflect_superseded": 0, "reflect_archived": 0, "reflect_cache_hit": 0}
+    if reasoner.model_name == "heuristic":
+        return rstats
+
+    active = [n for n in nodes_by_id.values() if n.status == "active"]
+    if len(active) < 2:
+        return rstats
+
+    summary = [
+        {
+            "id": n.id,
+            "type": n.type,
+            "scope": n.scope,
+            "severity": n.severity,
+            "valid_from": n.valid_from,
+            "seen_count": n.seen_count,
+            "rule": n.rule,
+            "rationale": n.rationale[:180],
+        }
+        for n in active
+    ]
+    fp = hashlib.sha256(json.dumps(summary, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    ckey = f"__reflect__:{fp}@{reasoner.model_name}"
+
+    cache = _load_distill_cache(cache_path)
+    if ckey in cache and isinstance(cache[ckey].get("actions"), list):
+        actions = cache[ckey]["actions"]
+        rstats["reflect_cache_hit"] = 1
+    else:
+        prompt = "Review these active FlowOS memory cards for contradictions, subsumed duplicates, or obsolescence:\n" + json.dumps(
+            summary, ensure_ascii=False
+        )
+        resp = reasoner.complete_json(prompt, system=_REFLECT_SYSTEM_PROMPT)
+        actions = resp.get("actions") if isinstance(resp, dict) and isinstance(resp.get("actions"), list) else []
+        cache[ckey] = {"actions": actions}
+        _save_distill_cache(cache_path, cache)
+
+    ts_now = now_iso()
+    for act in actions:
+        if not isinstance(act, dict):
+            continue
+        kind = str(act.get("action") or "").strip().lower()
+        reason = str(act.get("reason") or "sleep reflection").strip()
+
+        if kind == "supersede":
+            win_id = str(act.get("winner_id") or "")
+            lose_id = str(act.get("loser_id") or "")
+            if (
+                not win_id
+                or not lose_id
+                or win_id == lose_id
+                or lose_id in pinned_ids
+                or win_id not in nodes_by_id
+                or lose_id not in nodes_by_id
+            ):
+                continue
+            winner = nodes_by_id[win_id]
+            loser = nodes_by_id[lose_id]
+            if winner.status != "active" or loser.status != "active":
+                continue
+            loser.status = "superseded"
+            loser.valid_until = winner.valid_from or ts_now
+            loser.superseded_by = winner.id
+            edges.append(
+                GraphEdge(
+                    src_id=winner.id,
+                    dst_id=loser.id,
+                    edge_type="SUPERSEDES",
+                    valid_from=winner.valid_from or ts_now,
+                    meta={"reflect_reason": reason},
+                )
+            )
+            rstats["reflect_superseded"] += 1
+
+        elif kind == "archive":
+            tid = str(act.get("target_id") or "")
+            if not tid or tid in pinned_ids or tid not in nodes_by_id:
+                continue
+            target = nodes_by_id[tid]
+            if target.status != "active" or target.severity == "P0" or target.type == "principle":
+                continue
+            target.status = "archived"
+            target.valid_until = ts_now
+            target.rationale = (
+                f"{target.rationale} [reflect-archived: {reason}]".strip()
+                if target.rationale
+                else f"[reflect-archived: {reason}]"
+            )
+            rstats["reflect_archived"] += 1
+
+    return rstats
+
+
 def _compile_dream_nodes(
     engine: BrainEngine,
     atoms: list[LedgerAtom],
@@ -228,6 +409,24 @@ def _compile_dream_nodes(
 
     for atom in cleaned:
         meta = dict(atom.meta)
+
+        # Replay explicit immutable archive transition from ledger
+        archive_target_id = meta.get("archives")
+        if archive_target_id:
+            target = nodes_by_id.get(str(archive_target_id))
+            if target is not None:
+                target.status = "archived"
+                target.valid_until = atom.ts
+                if meta.get("archive_reason"):
+                    reason = str(meta["archive_reason"]).strip()
+                    target.rationale = (
+                        f"{target.rationale} [archived: {reason}]".strip()
+                        if target.rationale
+                        else f"[archived: {reason}]"
+                    )
+                target.updated_at = atom.ts
+            continue
+
         atom_kind = atom.kind
         origin_scope = (atom.scope or "global").strip().lower()
         atom_scope = origin_scope
@@ -346,7 +545,9 @@ def _compile_dream_nodes(
             confidence=float(
                 meta.get(
                     "confidence",
-                    0.9 if dist is not None else (0.85 if atom.source == "manual" else 0.75),
+                    0.92
+                    if atom.source == "manual:correct"
+                    else (0.9 if dist is not None else (0.85 if atom.source.startswith("manual") else 0.75)),
                 )
             ),
             trigger_when=triggers,
@@ -408,6 +609,19 @@ def _compile_dream_nodes(
                 )
             )
 
+    pinned_ids = _pinned_node_ids(engine)
+    expired_archived = _apply_ttl_decay(
+        [nodes_by_id[nid] for nid in node_order],
+        pinned_ids=pinned_ids,
+    )
+    reflect_stats = _reflect_active_nodes(
+        nodes_by_id,
+        edges,
+        active_reasoner,
+        engine.data_dir / "distill_cache.json",
+        pinned_ids=pinned_ids,
+    )
+
     active_nodes = [nodes_by_id[nid] for nid in node_order if nodes_by_id[nid].status == "active"]
     for i in range(len(active_nodes)):
         for j in range(i + 1, len(active_nodes)):
@@ -431,12 +645,15 @@ def _compile_dream_nodes(
         "input_atoms": len(atoms),
         "dropped_noise": dropped_noise,
         "compiled_nodes": len(node_order),
+        "active_nodes": len(active_nodes),
         "merged_duplicates": merged_count,
         "promoted_to_p0": promoted_p0,
+        "expired_archived": expired_archived,
         "conflicts_detected": conflicts_found,
         "edges": len(edges),
         "reasoner": active_reasoner.model_name,
         **distill_stats,
+        **reflect_stats,
     }
     return [nodes_by_id[nid] for nid in node_order], edges, stats
 

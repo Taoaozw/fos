@@ -388,6 +388,72 @@ class FosClient:
                 "outbox_path": str(self.outbox_path),
             }
 
+    def correct(
+        self,
+        node_id: str,
+        new_content: str,
+        *,
+        reason: str = "",
+        severity: str | None = None,
+    ) -> dict[str, Any]:
+        if not self.is_remote:
+            return self._engine().correct_node(
+                node_id,
+                new_content,
+                reason=reason,
+                severity=severity,
+                device=self.cfg.device,
+            )
+        try:
+            return self._request(
+                "POST",
+                f"/v1/nodes/{node_id}/correct",
+                json_body={
+                    "content": new_content,
+                    "reason": reason,
+                    "severity": severity,
+                    "device": self.cfg.device,
+                },
+            )
+        except OfflineError:
+            meta: dict[str, Any] = {"supersedes": node_id}
+            if severity:
+                meta["severity"] = severity
+            if reason:
+                meta["rationale"] = reason
+            queued = self._queue_outbox(
+                {
+                    "kind": "lesson",
+                    "scope": "global",
+                    "source": "manual:correct",
+                    "content": new_content,
+                    "meta": meta,
+                }
+            )
+            return {"mode": "offline_outbox", "queued": True, "atom": queued, "outbox_path": str(self.outbox_path)}
+
+    def archive(self, node_id: str, *, reason: str = "") -> dict[str, Any]:
+        if not self.is_remote:
+            return self._engine().archive_node(node_id, reason=reason, device=self.cfg.device)
+        try:
+            return self._request(
+                "POST",
+                f"/v1/nodes/{node_id}/archive",
+                json_body={"reason": reason, "device": self.cfg.device},
+            )
+        except OfflineError:
+            reason_clean = reason.strip() or "archived as obsolete/expired"
+            queued = self._queue_outbox(
+                {
+                    "kind": "outcome",
+                    "scope": "global",
+                    "source": "manual:archive",
+                    "content": f"Archive {node_id}: {reason_clean}",
+                    "meta": {"archives": node_id, "archive_reason": reason_clean},
+                }
+            )
+            return {"mode": "offline_outbox", "queued": True, "atom": queued, "outbox_path": str(self.outbox_path)}
+
     def ingest(
         self,
         *,

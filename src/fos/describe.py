@@ -101,6 +101,37 @@ COMMAND_SPECS: list[dict[str, Any]] = [
         ],
     },
     {
+        "name": "correct",
+        "aliases": ["cor", "fix"],
+        "readOnly": False,
+        "summary": "Self-correct a wrong/outdated node by superseding it with a refined rule (keeps kind & scope)",
+        "usage": 'fos correct <ID> "<corrected rule>" [--reason "..."] [--severity P0|P1|P2] [--json]',
+        "flags": [
+            {"name": "--reason", "type": "string", "desc": "why the previous rule was wrong or refined"},
+            {"name": "--severity", "type": "string", "desc": "optional override P0|P1|P2"},
+            {"name": "--json", "type": "bool", "default": "false", "desc": "JSON output"},
+        ],
+        "examples": [
+            'fos correct LSN-005 "Preserve decimal precision for upstream usage/quota fields" --reason "refined scope" --json',
+        ],
+        "notes": ["Exit code 3 = node not found."],
+    },
+    {
+        "name": "archive",
+        "aliases": ["arc", "retire"],
+        "readOnly": False,
+        "summary": "Retire an obsolete, expired, or already-guarded node (hides from active recall, preserves --as-of history)",
+        "usage": 'fos archive <ID> [--reason "..."] [--json]',
+        "flags": [
+            {"name": "--reason", "type": "string", "desc": "reason for archiving (e.g. codified as Guard Test / feature removed)"},
+            {"name": "--json", "type": "bool", "default": "false", "desc": "JSON output"},
+        ],
+        "examples": [
+            'fos archive LSN-006 --reason "enforced by unit tests and schema validation" --json',
+        ],
+        "notes": ["Exit code 3 = node not found."],
+    },
+    {
         "name": "ingest",
         "aliases": ["ing"],
         "readOnly": False,

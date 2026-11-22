@@ -559,9 +559,29 @@ class BrainEngine:
         atom: LedgerAtom,
         *,
         synthesize_eval: bool = True,
-    ) -> tuple[CompiledNode, CompiledNode | None]:
-        """Compile a single LedgerAtom into a CompiledNode + edges inside `db`."""
+    ) -> tuple[CompiledNode | None, CompiledNode | None]:
+        """Compile a single LedgerAtom into a CompiledNode + edges inside `db` (or apply archive transition)."""
         meta = atom.meta
+
+        # Pure lifecycle archive transition (does not create a clutter node)
+        archive_target_id = meta.get("archives")
+        if archive_target_id:
+            target = db.get_node(str(archive_target_id))
+            if target is not None:
+                target.status = "archived"
+                target.valid_until = atom.ts
+                if meta.get("archive_reason"):
+                    reason = str(meta["archive_reason"]).strip()
+                    target.rationale = (
+                        f"{target.rationale} [archived: {reason}]".strip()
+                        if target.rationale
+                        else f"[archived: {reason}]"
+                    )
+                target.updated_at = atom.ts
+                emb = self.providers.embedder.embed([node_embedding_text(target)])[0]
+                db.upsert_node(target, embedding=emb)
+            return None, target
+
         prefix = KIND_PREFIX.get(atom.kind, "MEM")
         node_id = str(meta.get("node_id") or db.next_sequence_id(prefix))
         severity = normalize_severity(meta.get("severity"), kind=atom.kind)
@@ -584,7 +604,12 @@ class BrainEngine:
             superseded_by=None,
             seen_count=int(meta.get("seen_count", 1)),
             seen_dates=[atom.ts[:10]] if len(atom.ts) >= 10 else [],
-            confidence=float(meta.get("confidence", 0.85 if atom.source == "manual" else 0.72)),
+            confidence=float(
+                meta.get(
+                    "confidence",
+                    0.92 if atom.source == "manual:correct" else (0.85 if atom.source.startswith("manual") else 0.72),
+                )
+            ),
             trigger_when=triggers,
             rule=rule,
             rationale=rationale,
@@ -692,21 +717,84 @@ class BrainEngine:
 
         # Index immediately into current active snapshot
         with self.snapshots.open_current() as db:
-            # Verify supersedes target exists if provided
+            # Verify supersedes/archives target exists if provided
             sup_id = persisted.meta.get("supersedes")
             if sup_id and db.get_node(str(sup_id)) is None:
                 raise NotFoundError(f"Supersedes target node not found: {sup_id}")
+            arc_id = persisted.meta.get("archives")
+            if arc_id and db.get_node(str(arc_id)) is None:
+                raise NotFoundError(f"Archive target node not found: {arc_id}")
             node, superseded = self._compile_atom_into_db(db, persisted, synthesize_eval=True)
             db.set_meta("atom_count", str(len(self.ledger.load_all_atoms())))
             snap_ver = db.get_meta("snapshot_version", self.snapshots.current_version() or "v0001")
 
         return {
             "atom": persisted.to_dict(),
-            "node": node.to_dict(),
-            "superseded": superseded.id if superseded else None,
+            "node": node.to_dict() if node else None,
+            "superseded": superseded.id if (superseded and sup_id) else None,
+            "archived": superseded.id if (superseded and arc_id) else None,
             "redacted": bool(persisted.meta.get("redacted_types")),
             "snapshot_version": snap_ver,
         }
+
+    def correct_node(
+        self,
+        node_id: str,
+        new_content: str,
+        *,
+        reason: str = "",
+        severity: str | None = None,
+        device: str | None = None,
+    ) -> dict[str, Any]:
+        """Self-correct an existing node by superseding it with a refined rule (immutable ledger)."""
+        if not new_content or not new_content.strip():
+            raise UsageError("Corrected content must be non-empty.")
+        with self.snapshots.open_current(read_only=True) as db:
+            old = db.get_node(node_id)
+            if old is None:
+                raise NotFoundError(f"Node not found: {node_id}", hint="run `fos recall <query>` to find node IDs")
+            kind = old.type
+            scope = old.scope
+            old_sev = old.severity
+
+        meta: dict[str, Any] = {
+            "supersedes": node_id,
+            "severity": severity or old_sev,
+        }
+        if reason.strip():
+            meta["rationale"] = reason.strip()
+        return self.add_atom(
+            kind=kind,
+            content=new_content.strip(),
+            scope=scope,
+            source="manual:correct",
+            device=device,
+            meta=meta,
+        )
+
+    def archive_node(
+        self,
+        node_id: str,
+        *,
+        reason: str = "",
+        device: str | None = None,
+    ) -> dict[str, Any]:
+        """Retire an obsolete/expired/already-guarded node cleanly (preserves --as-of history)."""
+        with self.snapshots.open_current(read_only=True) as db:
+            target = db.get_node(node_id)
+            if target is None:
+                raise NotFoundError(f"Node not found: {node_id}", hint="run `fos recall <query>` to find node IDs")
+            scope = target.scope
+
+        reason_clean = reason.strip() or "archived as obsolete/expired"
+        return self.add_atom(
+            kind="outcome",
+            content=f"Archive {node_id}: {reason_clean}",
+            scope=scope,
+            source="manual:archive",
+            device=device,
+            meta={"archives": node_id, "archive_reason": reason_clean},
+        )
 
     def rebuild_from_ledger(self) -> dict[str, Any]:
         """Rebuild a clean SQLite snapshot solely from immutable ledger/*.jsonl files."""

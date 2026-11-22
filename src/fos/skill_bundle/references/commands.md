@@ -11,14 +11,18 @@ fos get <ID> [--tier L0|L1|L2] [--graph] [--json]
 fos mirror "<proposal>" [--scope P] [--json]
 ```
 
-Short aliases: `b` (`boot`), `rec`/`r` (`recall`), `g` (`get`), `mir`/`check` (`mirror`), `a` (`add`), `s` (`sync`), `st` (`status`), `desc` (`describe`), `dr` (`dream`), `ev` (`eval`), `sk` (`skill`), `up` (`update`).
+Short aliases: `b` (`boot`), `rec`/`r` (`recall`), `g` (`get`), `mir`/`check` (`mirror`), `a` (`add`), `cor`/`fix` (`correct`), `arc`/`retire` (`archive`), `s` (`sync`), `st` (`status`), `desc` (`describe`), `dr` (`dream`), `ev` (`eval`), `sk` (`skill`), `up` (`update`).
 
-## 2. Capture & Passive Hindsight Ingestion
+## 2. Capture, Self-Correction, Archival & Passive Hindsight Ingestion
 
 ```bash
 # Record explicit lesson, decision, thought, outcome, or principle
 fos add --kind lesson --scope fops --severity P0 "Never use rsync --mkpath on macOS; run ssh mkdir -p first" --json
 fos add --kind decision --scope fos --supersedes DEC-001 "Use SQLite WAL + sqlite-vec" --json
+
+# Self-correct an inaccurate rule or retire an obsolete/guarded one (immutable ledger, --as-of preserved)
+fos correct LSN-005 "Preserve decimal precision for upstream usage/quota fields" --reason "refined boundary" --json
+fos archive LSN-006 --reason "enforced by permanent Guard Test" --json
 
 # Incremental high-compounding hindsight extraction (git fix commits + user taste/decisions)
 fos ingest --from all --since 7d --json

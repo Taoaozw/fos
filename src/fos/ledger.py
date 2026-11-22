@@ -154,7 +154,7 @@ class LedgerStore:
         existing = self.load_eval_cases()
         existing_pairs = {(c.suite, c.node_id, c.query) for c in existing}
 
-        is_curated = (source == "manual") or pinned or (node.severity == "P0")
+        is_curated = source.startswith("manual") or pinned or (node.severity == "P0")
         # 1. Recall + Fidelity case for curated P0/P1 lessons, decisions, principles
         if is_curated and node.type in ("lesson", "decision", "principle") and (
             node.severity in ("P0", "P1") or pinned

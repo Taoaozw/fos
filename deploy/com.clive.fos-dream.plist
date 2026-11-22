@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.clive.fos-dream</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/clive/project/clive/fos/deploy/fos-nightly.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FOS_HOME</key>
+    <string>/Users/clive/.fos</string>
+    <key>FOS_GIT_ROOT</key>
+    <string>/Users/clive/project/clive</string>
+    <key>PATH</key>
+    <string>/Users/clive/.local/bin:/Users/clive/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/clive/.fos/logs/fos-nightly.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/clive/.fos/logs/fos-nightly.err.log</string>
+</dict>
+</plist>

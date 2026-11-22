@@ -211,6 +211,8 @@ def test_dream_scope_invariant_keeps_single_repo_local_and_elevates_cross_repo(t
         def complete_json(self, prompt: str, *, system: str = "") -> dict | None:
             import json as _json
 
+            if "Review these active FlowOS memory cards" in prompt:
+                return {"actions": []}
             batch = _json.loads(prompt[prompt.index("[") :])
             return {
                 "items": [

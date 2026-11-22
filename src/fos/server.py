@@ -52,6 +52,18 @@ class EvalRequest(BaseModel):
     suite: str = "all"
 
 
+class CorrectRequest(BaseModel):
+    content: str
+    reason: str = ""
+    severity: str | None = None
+    device: str | None = None
+
+
+class ArchiveRequest(BaseModel):
+    reason: str = ""
+    device: str | None = None
+
+
 def _http_from_fos_error(exc: FosError) -> HTTPException:
     detail = {"error": str(exc), "code": int(exc.exit_code), "hint": exc.hint, "details": exc.details}
     if isinstance(exc, UsageError):
@@ -186,6 +198,26 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             return brain.get(node_id, tier=tier, include_graph=graph)
+        except FosError as exc:
+            raise _http_from_fos_error(exc) from exc
+
+    @app.post("/v1/nodes/{node_id}/correct", dependencies=[Depends(require_auth)])
+    def correct_node(node_id: str, req: CorrectRequest) -> dict[str, Any]:
+        try:
+            return brain.correct_node(
+                node_id,
+                req.content,
+                reason=req.reason,
+                severity=req.severity,
+                device=req.device,
+            )
+        except FosError as exc:
+            raise _http_from_fos_error(exc) from exc
+
+    @app.post("/v1/nodes/{node_id}/archive", dependencies=[Depends(require_auth)])
+    def archive_node(node_id: str, req: ArchiveRequest) -> dict[str, Any]:
+        try:
+            return brain.archive_node(node_id, reason=req.reason, device=req.device)
         except FosError as exc:
             raise _http_from_fos_error(exc) from exc
 

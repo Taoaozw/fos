@@ -51,6 +51,12 @@ def _print_result(data: Any, *, as_json: bool, command: str, fields: str | None 
         )
         return
 
+    if command == "boot_hook":
+        if data.get("count", 0) > 0:
+            print(data.get("kernel_text", ""))
+            print("(fos: run `fos mirror` before risky changes; `fos correct <ID>` / `fos archive <ID>` if a rule is wrong/obsolete)")
+        return
+
     if command == "recall":
         print(
             f"Recall ({data.get('mode', 'online')}, snap={data.get('snapshot_version')}, "
@@ -148,6 +154,7 @@ def build_parser() -> _StrictArgumentParser:
     p_boot.add_argument("--project", type=str, default=None)
     p_boot.add_argument("--all", dest="all_scopes", action="store_true", help="Include all scopes (skip cwd auto-detect)")
     p_boot.add_argument("--budget", type=int, default=300)
+    p_boot.add_argument("--hook", action="store_true", help="SessionStart hook mode (compact kernel only; silent when empty)")
     p_boot.add_argument("--fields", type=str, default=None, help="Comma-separated JSON fields (implies --json)")
     p_boot.add_argument("--json", action="store_true")
 
@@ -186,6 +193,20 @@ def build_parser() -> _StrictArgumentParser:
     p_add.add_argument("--trigger", action="append", default=None, help="Repeatable trigger_when phrase")
     p_add.add_argument("--evidence-ref", dest="evidence_ref", type=str, default=None)
     p_add.add_argument("--json", action="store_true")
+
+    # correct
+    p_cor = sub.add_parser("correct", aliases=["cor", "fix"], help="Self-correct an existing node by superseding it with a refined rule")
+    p_cor.add_argument("node_id", type=str)
+    p_cor.add_argument("content", type=str)
+    p_cor.add_argument("--reason", type=str, default="", help="Why the previous rule was wrong or refined")
+    p_cor.add_argument("--severity", type=str, default=None)
+    p_cor.add_argument("--json", action="store_true")
+
+    # archive
+    p_arc = sub.add_parser("archive", aliases=["arc", "retire"], help="Retire an obsolete, expired, or already-guarded node (preserves --as-of history)")
+    p_arc.add_argument("node_id", type=str)
+    p_arc.add_argument("--reason", type=str, default="", help="Why this node is being archived")
+    p_arc.add_argument("--json", action="store_true")
 
     # ingest
     p_ingest = sub.add_parser("ingest", aliases=["ing"], help="Collect high-compounding hindsight signals from git fixes & AI sessions")
@@ -348,6 +369,9 @@ def run_cli(argv: list[str] | None = None) -> int:
         elif cmd == "boot":
             project = None if args.all_scopes else (args.project or _detect_git_project())
             result = client.boot(project=project, budget=args.budget)
+            if args.hook and not as_json and not fields:
+                _print_result(result, as_json=False, command="boot_hook")
+                return int(ExitCode.OK)
         elif cmd == "recall":
             result = client.recall(
                 args.query,
@@ -373,6 +397,15 @@ def run_cli(argv: list[str] | None = None) -> int:
                 evidence_ref=args.evidence_ref,
                 trigger_when=args.trigger,
             )
+        elif cmd == "correct":
+            result = client.correct(
+                args.node_id,
+                args.content,
+                reason=args.reason,
+                severity=args.severity,
+            )
+        elif cmd == "archive":
+            result = client.archive(args.node_id, reason=args.reason)
         elif cmd == "ingest":
             root = Path(args.root).expanduser().resolve() if args.root else None
             result = client.ingest(source=args.source, since=args.since, root_dir=root, limit=args.limit)
