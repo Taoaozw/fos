@@ -13,3 +13,5 @@ build/
 *.db-shm
 .fos/
 views/
+web/node_modules/
+web/dist/

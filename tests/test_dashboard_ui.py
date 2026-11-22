@@ -1,4 +1,4 @@
-"""Tests for the built-in fosd Web Observability Console, /v1/dashboard, /v1/ledger, and `fos open`."""
+"""Tests for the React+TS Web Observability Console served by fosd, /v1/dashboard, /v1/ledger, and `fos open`."""
 
 import json
 from pathlib import Path
@@ -19,16 +19,29 @@ def test_web_ui_dashboard_and_ledger_endpoints(tmp_path: Path) -> None:
     l1 = engine.add_atom(kind="lesson", scope="goto", content="渠道用量必须保留小数精度", meta={"severity": "P1"})["node"]["id"]
     engine.correct_node(l1, "渠道用量与配额必须保留小数精度，禁止整数截断", reason="补充配额场景")
 
-    app = create_app(engine=engine, token_hash=hash_token(token))
+    # Serve a mock built React dist directory (keeps unit test independent of Vite build artifacts)
+    fake_dist = tmp_path / "web_dist"
+    (fake_dist / "assets").mkdir(parents=True)
+    (fake_dist / "index.html").write_text(
+        '<!doctype html><html><body><div id="root"></div><script src="/assets/app.js"></script></body></html>',
+        encoding="utf-8",
+    )
+    (fake_dist / "assets" / "app.js").write_text("console.log('fos');", encoding="utf-8")
+
+    app = create_app(engine=engine, token_hash=hash_token(token), web_dist=fake_dist)
     tc = TestClient(app)
 
-    # 1. Static HTML shell is served at / with zero embedded secrets or data
+    # 1. React SPA index.html & static /assets/* served cleanly with zero leaked secrets
     r_ui = tc.get("/")
     assert r_ui.status_code == 200
     assert "text/html" in r_ui.headers["content-type"]
-    assert "FlowOS" in r_ui.text
+    assert 'id="root"' in r_ui.text
     assert token not in r_ui.text
     assert "渠道用量" not in r_ui.text
+
+    r_js = tc.get("/assets/app.js")
+    assert r_js.status_code == 200
+    assert "console.log('fos')" in r_js.text
 
     # 2. /v1/dashboard requires Bearer auth
     assert tc.get("/v1/dashboard").status_code == 401

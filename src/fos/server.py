@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import hmac
+import os
 import re
 from importlib import resources
 from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from fos import __version__
@@ -84,18 +87,41 @@ def _brain_base_url(request: Request) -> str:
     return f"{scheme}://{host}"
 
 
+def _resolve_web_dist() -> Path | None:
+    env_dist = os.environ.get("FOS_WEB_DIST")
+    if env_dist:
+        p = Path(env_dist).expanduser().resolve()
+        if (p / "index.html").is_file():
+            return p
+    repo_dist = Path(__file__).resolve().parents[2] / "web" / "dist"
+    if (repo_dist / "index.html").is_file():
+        return repo_dist
+    return None
+
+
 def create_app(
     *,
     engine: BrainEngine | None = None,
     token_hash: str | None = None,
     home: Path | None = None,
+    web_dist: Path | None = None,
 ) -> FastAPI:
     cfg: FosConfig = load_config(home)
     brain = engine or BrainEngine.from_config(cfg, home=home)
     expected_hash = token_hash if token_hash is not None else cfg.token_hash
     dist_dir = brain.data_dir / "dist"
+    resolved_web_dist = web_dist if web_dist is not None else _resolve_web_dist()
 
     app = FastAPI(title="FlowOS Brain (fosd)", version=__version__)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    if resolved_web_dist is not None and (resolved_web_dist / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=str(resolved_web_dist / "assets")), name="web-assets")
 
     @app.middleware("http")
     async def attach_cli_version_header(request: Request, call_next: Any) -> Response:
@@ -116,8 +142,18 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     def web_ui() -> HTMLResponse:
-        html = resources.files("fos.assets").joinpath("ui.html").read_text(encoding="utf-8")
-        return HTMLResponse(content=html, headers={"Cache-Control": "no-cache"})
+        if resolved_web_dist is not None and (resolved_web_dist / "index.html").is_file():
+            html = (resolved_web_dist / "index.html").read_text(encoding="utf-8")
+            return HTMLResponse(content=html, headers={"Cache-Control": "no-cache"})
+        return HTMLResponse(
+            content=(
+                "<!doctype html><html><body style='font-family:sans-serif;padding:32px'>"
+                "<h2>FlowOS Web UI not built yet</h2>"
+                "<p>Run <code>cd web &amp;&amp; bun install &amp;&amp; bun run build</code> (or <code>bun run dev</code>).</p>"
+                "</body></html>"
+            ),
+            status_code=200,
+        )
 
     @app.get("/v1/health")
     def health() -> dict[str, Any]:
