@@ -9,6 +9,19 @@ from typing import Any
 _CJK_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
 _WORD_RE = re.compile(r"[A-Za-z0-9_./:-]+")
 _CJK_RUN_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]+")
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+_EN_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "a", "an", "and", "any", "are", "as", "at", "be", "been", "being", "but",
+        "by", "can", "could", "did", "do", "does", "for", "from", "had", "has",
+        "have", "here", "how", "i", "if", "in", "into", "is", "it", "its", "me",
+        "my", "of", "on", "or", "our", "should", "so", "some", "that", "the",
+        "their", "them", "there", "these", "they", "this", "to", "was", "we",
+        "were", "what", "when", "where", "which", "who", "why", "will", "with",
+        "would", "you", "your",
+    }
+)
 
 
 def estimate_tokens(text: str) -> int:
@@ -31,19 +44,22 @@ def estimate_json_tokens(obj: Any) -> int:
 
 
 def tokenize_for_fts(text: str) -> str:
-    """Produce FTS5-friendly token string supporting both English identifiers and CJK bigrams."""
+    """Produce FTS5-friendly token string supporting English identifiers, camelCase, and CJK bigrams."""
     if not text:
         return ""
     tokens: list[str] = []
-    # Keep normalized Latin/technical tokens (including --mkpath, rsync, DEC-001)
-    for m in _WORD_RE.finditer(text.lower()):
-        tok = m.group(0).strip(".-:/_")
-        if tok:
-            tokens.append(tok)
-            # Also split sub-parts of kebab/snake/path tokens for broader BM25 match
-            for part in re.split(r"[-_./:]+", tok):
-                if part and part != tok:
-                    tokens.append(part)
+    # Keep normalized Latin/technical tokens (including --mkpath, rsync, DEC-001, DataBuffer)
+    for m in _WORD_RE.finditer(text):
+        raw_tok = m.group(0).strip(".-:/_")
+        if not raw_tok:
+            continue
+        tok = raw_tok.lower()
+        tokens.append(tok)
+        # Split kebab/snake/path AND camelCase sub-parts (e.g. DataBuffer -> data, buffer)
+        camel_split = _CAMEL_BOUNDARY_RE.sub(" ", raw_tok).lower()
+        for part in re.split(r"[-_./:\s]+", camel_split):
+            if part and part != tok:
+                tokens.append(part)
 
     # Emit CJK bigrams (and unigrams for 1-char or boundary precision)
     for m in _CJK_RUN_RE.finditer(text):
@@ -58,9 +74,15 @@ def tokenize_for_fts(text: str) -> str:
     return " ".join(tokens)
 
 
+def is_stopword(token: str) -> bool:
+    return token in _EN_STOPWORDS
+
+
 def extract_terms(text: str) -> set[str]:
-    """Extract normalized search terms for overlap scoring and lexical checks."""
-    return set(tokenize_for_fts(text).split())
+    """Extract normalized content search terms (filtering high-frequency English stopwords)."""
+    raw = set(tokenize_for_fts(text).split())
+    content = {t for t in raw if t not in _EN_STOPWORDS}
+    return content if content else raw
 
 
 def truncate_to_tokens(text: str, max_tokens: int) -> str:

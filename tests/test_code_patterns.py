@@ -310,3 +310,60 @@ def test_pattern_sync_evolution_and_antipattern_demotion(tmp_path: Path, capsys)
     assert client.get(id_v2)["node"]["status"] == "superseded"
     assert client.get(id_v3)["node"]["status"] == "superseded"
     assert client.get(demoted["node"]["id"])["node"]["status"] == "active"
+
+
+def test_camelcase_tokenization_stopwords_and_neural_hybrid_preservation(tmp_path: Path) -> None:
+    from fos.engine import query_snapshot_recall
+    from fos.models import CompiledNode
+    from fos.providers import LexicalReranker
+    from fos.store import SnapshotDB
+    from fos.tokens import extract_terms, tokenize_for_fts
+
+    # CamelCase splitting improves code identifier matching
+    toks = set(tokenize_for_fts("DetachableBody DataBuffer JsonScan").split())
+    assert {"detachablebody", "detachable", "body", "databuffer", "data", "buffer", "jsonscan", "json", "scan"} <= toks
+
+    # English stopwords are filtered from content terms
+    terms = extract_terms("How can I avoid memory copy in the WebFlux proxy?")
+    assert "how" not in terms and "the" not in terms and "in" not in terms
+    assert {"avoid", "memory", "copy", "webflux", "proxy"} <= terms
+
+    # Neural hybrid recall MUST NOT discard semantic similarity when lexical overlap > 0
+    class _FakeNeuralEmbedder:
+        dim = 4
+        model_name = "mlx:fake-neural"
+
+        def embed_query(self, _q: str) -> list[float]:
+            return [1.0, 0.0, 0.0, 0.0]
+
+    with SnapshotDB(tmp_path / "neural.db", embedding_dim=4) as db:
+        n_sem = CompiledNode(
+            id="DEC-001",
+            type="decision",
+            scope="global",
+            severity="P1",
+            valid_from="2026-01-01T00:00:00Z",
+            rule="Zero-copy streaming relay over Reactive buffers",
+            l0="[DEC-001|P1|seen:1] Zero-copy streaming",
+        )
+        n_lex_noise = CompiledNode(
+            id="DEC-002",
+            type="decision",
+            scope="global",
+            severity="P1",
+            valid_from="2026-01-01T00:00:00Z",
+            rule="Python configuration loader for proxy settings",
+            l0="[DEC-002|P1|seen:1] Python config",
+        )
+        # n_sem is exact semantic match (cos=1.0), n_lex_noise is orthogonal (cos=0.1) despite sharing "python"/"proxy"
+        db.upsert_node(n_sem, embedding=[1.0, 0.0, 0.0, 0.0])
+        db.upsert_node(n_lex_noise, embedding=[0.1, 0.995, 0.0, 0.0])
+
+        res = query_snapshot_recall(
+            db,
+            "python proxy streaming zero copy",
+            embedder=_FakeNeuralEmbedder(),
+            reranker=LexicalReranker(),
+            limit=5,
+        )
+        assert res["results"][0]["id"] == "DEC-001"

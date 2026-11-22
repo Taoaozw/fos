@@ -312,13 +312,15 @@ def query_snapshot_recall(
     # Way 3: Trigger & Entity direct match + 1-2 Hop Graph Expansion
     q_terms = extract_terms(query)
     trigger_hits: list[tuple[str, float]] = []
+    min_trig_overlap = 2 if len(q_terms) >= 3 else 1
     for nid, node in valid_map.items():
         trig_terms = extract_terms(" ".join(node.trigger_when + node.entities))
         if not trig_terms or not q_terms:
             continue
         overlap = len(q_terms & trig_terms)
-        if overlap > 0:
-            score = overlap / max(1, min(len(q_terms), len(trig_terms)))
+        if overlap >= min_trig_overlap:
+            # Cosine-damped overlap avoids 1-term triggers hijacking rank #1
+            score = overlap / math.sqrt(len(q_terms) * len(trig_terms))
             trigger_hits.append((nid, score))
     trigger_hits.sort(key=lambda x: x[1], reverse=True)
 
@@ -338,6 +340,7 @@ def query_snapshot_recall(
     ]
 
     # RRF Fusion across active channels
+    has_neural = embedder is not None and not str(getattr(embedder, "model_name", "")).startswith("local_hash")
     rrf_k = 60.0
     rrf_scores: dict[str, float] = {}
     channels: dict[str, list[str]] = {}
@@ -360,10 +363,17 @@ def query_snapshot_recall(
             if name not in channels[nid]:
                 channels[nid].append(name)
 
-    _add_channel("fts", fts_hits, weight=1.2)
-    _add_channel("vec", vec_hits, weight=1.0)
-    _add_channel("trigger", trigger_hits[:30], weight=1.15)
-    _add_channel("graph", graph_hits[:20], weight=0.6)
+    if has_neural:
+        # When a real neural embedder is active, keep vec as primary semantic signal so lexical channels augment rather than drown it
+        _add_channel("vec", vec_hits, weight=2.0)
+        _add_channel("fts", fts_hits, weight=0.95)
+        _add_channel("trigger", trigger_hits[:30], weight=0.5)
+        _add_channel("graph", graph_hits[:20], weight=0.45)
+    else:
+        _add_channel("fts", fts_hits, weight=1.2)
+        _add_channel("vec", vec_hits, weight=1.0)
+        _add_channel("trigger", trigger_hits[:30], weight=1.15)
+        _add_channel("graph", graph_hits[:20], weight=0.6)
 
     # If all channels returned nothing (e.g. ultra-short query), fall back to lexical scan over valid nodes
     if not rrf_scores:
@@ -371,8 +381,15 @@ def query_snapshot_recall(
             rrf_scores[nid] = 0.001
             channels[nid] = ["fallback"]
 
-    # Pre-select top candidates for Cross-Encoder / Lexical Rerank
-    top_ids = sorted(rrf_scores, key=lambda nid: rrf_scores[nid], reverse=True)[: max(limit * 2, 24)]
+    # Pre-select top candidates for Cross-Encoder / Lexical Rerank (always preserve top neural vector hits)
+    pool_size = max(limit * 2, 24)
+    top_ids = sorted(rrf_scores, key=lambda nid: rrf_scores[nid], reverse=True)[:pool_size]
+    if has_neural and vec_hits:
+        top_set = set(top_ids)
+        for nid, _ in vec_hits[:15]:
+            if nid not in top_set:
+                top_ids.append(nid)
+                top_set.add(nid)
 
     rerank_scores: dict[str, float] = {}
     if reranker is not None and top_ids:
@@ -389,15 +406,19 @@ def query_snapshot_recall(
         node = valid_map[nid]
         norm_rrf = rrf_scores[nid] / max_rrf
         lex_rr = rerank_scores.get(nid, 0.0)
-        # Use lexical rerank when overlap exists; fall back to min-max neural vector similarity on cross-lingual queries (lex_rr == 0)
         sem_rr = vec_sim_map.get(nid, 0.0)
-        rr = lex_rr if lex_rr > 0 else sem_rr
+        if has_neural:
+            # Never discard neural semantic similarity when lexical overlap > 0; blend semantically + lexically
+            rel = 0.68 * sem_rr + 0.14 * lex_rr + 0.18 * norm_rrf
+        else:
+            rr = lex_rr if lex_rr > 0 else sem_rr
+            rel = 0.55 * rr + 0.45 * norm_rrf
         salience = severity_weight(node.severity) * (1.0 + math.log(1.0 + max(1, node.seen_count))) * recency_weight(node.valid_from, ref_time)
         # Scope boost for exact project match over 'global'
         scope_boost = 1.25 if (scope and node.scope == scope) else 1.0
         fresh = check_source_freshness(node.source_ref, node.source_hash)
         util_mult = utility_multiplier(u_stats.get(nid))
-        combined = (0.55 * rr + 0.45 * norm_rrf) * salience * scope_boost * freshness_multiplier(fresh) * util_mult
+        combined = rel * salience * scope_boost * freshness_multiplier(fresh) * util_mult
         final_ranked.append((nid, combined, fresh))
 
     final_ranked.sort(key=lambda x: x[1], reverse=True)

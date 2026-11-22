@@ -13,7 +13,7 @@ from typing import Any
 
 from fos.errors import NotFoundError
 from fos.models import CompiledNode, GraphEdge, is_valid_at, now_iso
-from fos.tokens import tokenize_for_fts
+from fos.tokens import is_stopword, tokenize_for_fts
 
 SCHEMA_VERSION = "1"
 
@@ -60,10 +60,13 @@ def _sanitize_fts_query(query: str) -> str:
     tokens = tokenize_for_fts(query).split()
     if not tokens:
         return ""
+    # Prefer content tokens (filter stopwords) so long queries don't waste FTS5 budget on "the"/"how"/"my"
+    content = [t for t in tokens if not is_stopword(t)]
+    effective = content if content else tokens
     # Deduplicate while preserving order; quote each token to avoid FTS5 syntax errors on '-' or ':'
     seen: set[str] = set()
     parts: list[str] = []
-    for tok in tokens:
+    for tok in effective:
         clean = tok.replace('"', "").strip()
         if clean and clean not in seen:
             seen.add(clean)
@@ -543,7 +546,11 @@ class SnapshotDB:
                     """,
                     (sqlite_vec.serialize_float32(query_vec), limit),
                 ).fetchall()
-                return [(str(r["node_id"]), max(0.0, 1.0 - float(r["distance"]) / 2.0)) for r in rows]
+                # sqlite-vec returns L2 distance on unit-normalized vectors: cos = 1 - L2^2 / 2
+                return [
+                    (str(r["node_id"]), max(0.0, 1.0 - (float(r["distance"]) ** 2) / 2.0))
+                    for r in rows
+                ]
             except sqlite3.OperationalError:
                 pass
 
