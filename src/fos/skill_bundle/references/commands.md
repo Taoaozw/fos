@@ -1,0 +1,66 @@
+# fos Command Reference
+
+Read this file on demand for evolution workflows (`ingest`, `dream`, `eval`, `undo`), client sync/self-update, and exit-code contracts. For exact flag schemas of any command, run `fos describe <command>`.
+
+## 1. Memory Retrieval & Inspection
+
+```bash
+fos boot [--project P | --all] [--budget 300] [--fields id,severity,l0] [--json]
+fos recall "<query>" [--kind lesson|decision|thought|outcome|principle] [--scope P] [--as-of 2026-08] [--budget 1200] [--fields id,rule] [--json]
+fos get <ID> [--tier L0|L1|L2] [--graph] [--json]
+fos mirror "<proposal>" [--scope P] [--json]
+```
+
+Short aliases: `b` (`boot`), `rec`/`r` (`recall`), `g` (`get`), `mir`/`check` (`mirror`), `a` (`add`), `s` (`sync`), `st` (`status`), `desc` (`describe`), `dr` (`dream`), `ev` (`eval`), `sk` (`skill`), `up` (`update`).
+
+## 2. Capture & Passive Hindsight Ingestion
+
+```bash
+# Record explicit lesson, decision, thought, outcome, or principle
+fos add --kind lesson --scope fops --severity P0 "Never use rsync --mkpath on macOS; run ssh mkdir -p first" --json
+fos add --kind decision --scope fos --supersedes DEC-001 "Use SQLite WAL + sqlite-vec" --json
+
+# Incremental hindsight extraction from local AI/tool traces (secret-redacted, cursor-tracked)
+fos ingest --from claude --since 24h --json
+fos ingest --from codex --since 24h --json
+fos ingest --from antigravity --since 24h --json
+fos ingest --from fops --since 24h --json
+```
+
+## 3. Sleep Compilation, Regression Gates & Rollback (M3 Max Brain)
+
+```bash
+fos dream [--dry-run] [--no-gate] [--export-songe ./songe.jsonl] --json
+fos eval [--suite all|recall|temporal|fidelity|behavior] --json
+fos eval pin <ID> --json
+fos undo --json
+fos rebuild --json
+fos export --format md --out ./views/ --json
+```
+
+## 4. Multi-Device Sync, Status, Skills & Auto-Update
+
+```bash
+# First-time portable device setup (or via one-line curl installer from brain)
+fos init --brain http://<m3max-tailscale-ip>:7622 --token <TOKEN>
+fos sync --json
+
+# Diagnostics, skill refresh, and self-update
+fos status [--offline] --json
+fos skill install [--dir DIR] [--refresh-only] --json
+fos update [--check] [--json]
+```
+
+- When the brain advertises a newer CLI wheel (`X-Fos-Version`), `fos` silently triggers a debounced background self-update (`FOS_NO_AUTOUPDATE=1` disables it), verifies SHA-256, and automatically refreshes installed `SKILL.md` files via `fos skill install --refresh-only`.
+
+## 5. Machine-Readable Output & Exit Codes
+
+- `--json` emits single-line compact JSON when piped/captured, and pretty JSON on TTY (override with `FOS_COMPACT_JSON=1` or `FOS_PRETTY_JSON=1`).
+- On error with `--json`, `stderr` emits `{"ok":false,"code":"...","error":"...","hint":"..."}`.
+- Semantic exit codes:
+  - `0`: success
+  - `1`: runtime / network / auth error
+  - `2`: invalid usage or flags
+  - `3`: target not found (`get`, `describe`, `undo`, `eval pin`)
+  - `4`: regression gate failed (`dream`, `eval`)
+  - `130`: interrupted (`Ctrl-C`)

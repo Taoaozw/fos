@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fos"
+version = "0.1.0"
+description = "FlowOS: AI-native cognitive compilation and memory engine"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+brain = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+    "sqlite-vec>=0.1.6",
+]
+mlx = [
+    "mlx-embeddings>=0.0.5",
+    "mlx-lm>=0.22.0",
+]
+dev = [
+    "pytest>=8.3.0",
+]
+
+[project.scripts]
+fos = "fos.cli:main"
+fosd = "fos.daemon_cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fos"]
+artifacts = [
+    "src/fos/skill_bundle/**",
+    "src/fos/assets/**",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
