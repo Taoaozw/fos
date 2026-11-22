@@ -71,6 +71,14 @@ def build_l0_line(node: CompiledNode) -> str:
 
 def split_rule_and_rationale(raw: str) -> tuple[str, str]:
     """Split a raw statement into a crisp rule/claim and rationale if separable."""
+    # For hindsight-collected pairs ("Context: ...\nHindsight: ..."), make Hindsight the rule and Context the rationale
+    if "Hindsight:" in raw:
+        before, after = raw.split("Hindsight:", 1)
+        ctx = before.replace("Context:", "", 1).strip()
+        hind = " ".join(line.strip() for line in after.strip().splitlines() if line.strip())
+        if hind:
+            return truncate_to_tokens(hind, 90), truncate_to_tokens(ctx, 60)
+
     clean = " ".join(line.strip() for line in raw.strip().splitlines() if line.strip())
     for sep in ("因为", "原因:", "原因：", "because ", "rationale:", "理由:", "理由："):
         idx = clean.lower().find(sep.lower())
@@ -78,7 +86,6 @@ def split_rule_and_rationale(raw: str) -> tuple[str, str]:
             rule = clean[:idx].strip(" ,;，；。")
             rationale = clean[idx:].strip()
             return rule, rationale
-    # Also handle arrow separator "cause -> rule" or "context => action"
     return truncate_to_tokens(clean, 80), ""
 
 

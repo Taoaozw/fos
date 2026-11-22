@@ -423,8 +423,9 @@ def evaluate_snapshot(
     regressions: list[str] = []
 
     if "recall" in suites_to_run:
+        has_golden_recall = any(c.suite == "recall" and c.expected_ids for c in cases)
         results["recall"] = _eval_recall(db, cases, providers)
-        if baseline_db is not None:
+        if baseline_db is not None and has_golden_recall:
             base_rec = _eval_recall(baseline_db, cases, providers)
             results["recall"]["baseline_recall_at_5"] = base_rec["recall_at_5"]
             results["recall"]["baseline_mrr"] = base_rec["mrr"]
