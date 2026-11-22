@@ -339,6 +339,9 @@ class FosClient:
         entities: list[str] | None = None,
         evidence_ref: str | None = None,
         trigger_when: list[str] | None = None,
+        source_ref: str | None = None,
+        source_hash: str | None = None,
+        verified_at: str | None = None,
     ) -> dict[str, Any]:
         if kind not in VALID_KINDS:
             raise UsageError(f"Invalid kind '{kind}'. Must be one of: {', '.join(VALID_KINDS)}")
@@ -356,6 +359,12 @@ class FosClient:
             meta["evidence_ref"] = evidence_ref
         if trigger_when:
             meta["trigger_when"] = trigger_when
+        if source_ref:
+            meta["source_ref"] = source_ref
+        if source_hash:
+            meta["source_hash"] = source_hash
+        if verified_at:
+            meta["verified_at"] = verified_at
 
         if not self.is_remote:
             return self._engine().add_atom(
@@ -479,6 +488,9 @@ class FosClient:
                 source=ev["source"],
                 severity=ev["meta"].get("severity"),
                 evidence_ref=ev["meta"].get("evidence_ref"),
+                source_ref=ev["meta"].get("source_ref"),
+                source_hash=ev["meta"].get("source_hash"),
+                verified_at=ev["meta"].get("verified_at"),
             )
             if res.get("queued"):
                 queued += 1

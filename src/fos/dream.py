@@ -141,6 +141,7 @@ def _save_distill_cache(cache_path: Path, cache: dict[str, dict[str, Any]]) -> N
 _L1_RULE_MAX_TOKENS = 95
 _L1_RATIONALE_MAX_TOKENS = 48
 _L1_GUARD_MAX_TOKENS = 42
+_NEGATION_RE = re.compile(r"(?:禁止|不要|不得|不可|严禁|切勿|避免|不能|\b(?:never|avoid|must\s+not|do\s+not|don't|forbid)\b)", re.IGNORECASE)
 
 
 def _distill_hindsight_batch(
@@ -162,13 +163,17 @@ def _distill_hindsight_batch(
             continue
         ckey = f"{atom.id}@{reasoner.model_name}"
         cached = cache.get(ckey)
-        # Re-distill legacy bloated cache entries (>95t rule) into compact pointer-first summaries
-        is_bloated_cached = bool(
+        cached_rule = str((cached or {}).get("rule") or "")
+        # Re-distill legacy bloated cache entries (>95t) or P0 rules that lost negation polarity
+        is_bloated_cached = bool(cached and cached.get("keep", True) and estimate_tokens(cached_rule) > _L1_RULE_MAX_TOKENS)
+        lost_negation = bool(
             cached
             and cached.get("keep", True)
-            and estimate_tokens(str(cached.get("rule") or "")) > _L1_RULE_MAX_TOKENS
+            and atom.kind == "principle"
+            and _NEGATION_RE.search(atom.raw)
+            and not _NEGATION_RE.search(cached_rule)
         )
-        if cached is not None and not is_bloated_cached:
+        if cached is not None and not is_bloated_cached and not lost_negation:
             results[atom.id] = cached
             stats["distill_cache_hits"] += 1
             if cached.get("keep", True):

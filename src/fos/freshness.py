@@ -75,32 +75,43 @@ def resolve_legacy_source_ref(scope: str, source: str, meta: dict[str, Any]) -> 
     if meta.get("source_ref"):
         return str(meta["source_ref"]), str(meta.get("source_hash") or "")
     doc_file = str(meta.get("doc_file") or "").strip()
+    section = str(meta.get("doc_section") or "").strip()[:60]
+    if not doc_file:
+        ev_ref = str(meta.get("evidence_ref") or "").strip()
+        if ev_ref.startswith("doc:"):
+            file_part, _, sec_part = ev_ref[4:].partition("#")
+            doc_file = file_part.strip()
+            section = section or sec_part.strip()[:60]
     if not doc_file:
         return "", ""
-    section = str(meta.get("doc_section") or "").strip()[:60]
     home = Path.home()
-    candidates: list[Path] = []
+    search_dirs: list[Path] = []
     if scope == "global":
         if "gemini" in source:
-            candidates.append(home / ".gemini" / doc_file)
+            search_dirs.append(home / ".gemini")
         if "codex" in source:
-            candidates.append(home / ".codex" / doc_file)
+            search_dirs.append(home / ".codex")
         if "agent" in source or "pi" in source:
-            candidates.append(home / ".pi" / "agent" / doc_file)
+            search_dirs.append(home / ".pi" / "agent")
         if "claude" in source:
-            candidates.extend([home / ".claude" / doc_file, home / ".claude" / "rules" / doc_file])
+            search_dirs.extend([home / ".claude", home / ".claude" / "rules"])
     else:
         git_root = Path(os.environ.get("FOS_GIT_ROOT") or (home / "project" / "clive"))
         repo = git_root / scope
-        candidates.extend(
-            [
-                repo / doc_file,
-                repo / "docs" / doc_file,
-                repo / "docs" / "agents" / doc_file,
-            ]
-        )
-    for cand in candidates:
-        if cand.is_file():
+        search_dirs.extend([repo, repo / "docs", repo / "docs" / "agents"])
+
+    target_lower = doc_file.lower()
+    for d in search_dirs:
+        if not d.is_dir():
+            continue
+        direct = d / doc_file
+        cand: Path | None = direct if direct.is_file() else None
+        if cand is None:
+            for p in d.iterdir():
+                if p.is_file() and p.name.lower() == target_lower:
+                    cand = p
+                    break
+        if cand is not None:
             ref = f"{cand.resolve()}#{section}" if section else str(cand.resolve())
             try:
                 digest = compute_doc_digest(cand)
