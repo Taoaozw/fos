@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from fos import __version__
@@ -114,6 +114,11 @@ def create_app(
         if not hmac.compare_digest(hash_token(presented), expected_hash):
             raise HTTPException(status_code=403, detail={"error": "Invalid Bearer token"})
 
+    @app.get("/", response_class=HTMLResponse)
+    def web_ui() -> HTMLResponse:
+        html = resources.files("fos.assets").joinpath("ui.html").read_text(encoding="utf-8")
+        return HTMLResponse(content=html, headers={"Cache-Control": "no-cache"})
+
     @app.get("/v1/health")
     def health() -> dict[str, Any]:
         published = find_published_wheel(dist_dir)
@@ -123,6 +128,18 @@ def create_app(
             "cli_version": published[0] if published else "",
             "snapshot_version": brain.snapshots.current_version(),
             "auth_enabled": bool(expected_hash),
+        }
+
+    @app.get("/v1/dashboard", dependencies=[Depends(require_auth)])
+    def dashboard(ledger_limit: int = Query(default=80, ge=1, le=500)) -> dict[str, Any]:
+        return brain.dashboard_summary(ledger_limit=ledger_limit)
+
+    @app.get("/v1/ledger", dependencies=[Depends(require_auth)])
+    def ledger_list(limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
+        atoms = brain.ledger.load_all_atoms()
+        return {
+            "total": len(atoms),
+            "atoms": [a.to_dict() for a in reversed(atoms[-limit:])],
         }
 
     # --- CLI distribution & one-line installer (learned from fops) ---

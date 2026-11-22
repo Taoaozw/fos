@@ -269,6 +269,12 @@ def build_parser() -> _StrictArgumentParser:
     p_upd.add_argument("--background", action="store_true", help="Silent background auto-update mode")
     p_upd.add_argument("--json", action="store_true")
 
+    # open
+    p_open = sub.add_parser("open", aliases=["ui", "browse"], help="Open fosd Web Observability Console in default browser")
+    p_open.add_argument("--print", dest="print_only", action="store_true", help="Print URL without opening browser")
+    p_open.add_argument("--port", type=int, default=7622, help="Local fosd port when in local mode")
+    p_open.add_argument("--json", action="store_true")
+
     return parser
 
 
@@ -434,6 +440,17 @@ def run_cli(argv: list[str] | None = None) -> int:
             result = client.undo()
         elif cmd == "rebuild":
             result = client.rebuild()
+        elif cmd == "open":
+            import webbrowser
+
+            url = client.cfg.brain_url.rstrip("/") + "/" if client.is_remote else f"http://127.0.0.1:{args.port}/"
+            opened = False
+            if not args.print_only:
+                opened = bool(webbrowser.open(url))
+            result = {"url": url, "opened": opened, "mode": client.cfg.mode}
+            if not as_json:
+                print(url)
+                return int(ExitCode.OK)
         else:
             raise UsageError(f"Unknown command: {cmd}")
 

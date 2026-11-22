@@ -896,6 +896,72 @@ class BrainEngine:
         with self.snapshots.open_current(read_only=True) as db:
             return db.export_compact_bundle()
 
+    def dashboard_summary(self, *, ledger_limit: int = 80) -> dict[str, Any]:
+        """Aggregate full observability snapshot for the fosd Web UI."""
+        with self.snapshots.open_current(read_only=True) as db:
+            all_nodes = db.list_nodes(include_inactive=True)
+            all_edges = db.all_edges()
+            meta = db.all_meta()
+            has_vec = db.has_sqlite_vec
+
+        atoms = self.ledger.load_all_atoms()
+        golden = self.ledger.load_eval_cases()
+        pinned_ids: set[str] = set()
+        for c in golden:
+            if c.pinned:
+                if c.node_id:
+                    pinned_ids.add(c.node_id)
+                pinned_ids.update(c.expected_ids)
+
+        by_status: dict[str, int] = {"active": 0, "superseded": 0, "archived": 0}
+        by_type: dict[str, int] = {}
+        by_scope: dict[str, int] = {}
+        by_severity: dict[str, int] = {"P0": 0, "P1": 0, "P2": 0}
+
+        node_dicts: list[dict[str, Any]] = []
+        for n in all_nodes:
+            by_status[n.status] = by_status.get(n.status, 0) + 1
+            if n.status == "active":
+                by_type[n.type] = by_type.get(n.type, 0) + 1
+                by_scope[n.scope] = by_scope.get(n.scope, 0) + 1
+                by_severity[n.severity] = by_severity.get(n.severity, 0) + 1
+            d = n.to_dict()
+            d["pinned"] = n.id in pinned_ids
+            node_dicts.append(d)
+
+        # Rejected snapshots count for regression gate visibility
+        rejected_dir = self.snapshots.rejected_dir
+        rejected_snaps = sorted(p.stem for p in rejected_dir.glob("v*.db")) if rejected_dir.exists() else []
+
+        recent_atoms = [a.to_dict() for a in reversed(atoms[-ledger_limit:])]
+        return {
+            "snapshot_version": self.snapshots.current_version(),
+            "history": self.snapshots.history(),
+            "rejected_snapshots": rejected_snaps,
+            "sqlite_vec": has_vec,
+            "meta": meta,
+            "counts": {
+                "total_nodes": len(all_nodes),
+                "active_nodes": by_status["active"],
+                "superseded_nodes": by_status["superseded"],
+                "archived_nodes": by_status["archived"],
+                "ledger_atoms": len(atoms),
+                "golden_cases": len(golden),
+                "pinned_nodes": len(pinned_ids),
+                "edges": len(all_edges),
+            },
+            "distributions": {
+                "by_status": by_status,
+                "by_type": by_type,
+                "by_scope": by_scope,
+                "by_severity": by_severity,
+            },
+            "scopes": sorted(by_scope.keys(), key=lambda s: (0 if s == "global" else 1, s)),
+            "nodes": node_dicts,
+            "edges": [e.to_dict() for e in all_edges],
+            "recent_atoms": recent_atoms,
+        }
+
     def export_markdown(self, out_dir: Path) -> dict[str, Any]:
         """Generate read-only human-browsable Markdown projection from compiled snapshot."""
         out = Path(out_dir).resolve()

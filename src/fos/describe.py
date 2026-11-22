@@ -241,6 +241,18 @@ COMMAND_SPECS: list[dict[str, Any]] = [
         "summary": "Emit machine-readable command catalog or full flag schema for a specific command",
         "usage": "fos describe [COMMAND]",
     },
+    {
+        "name": "open",
+        "aliases": ["ui", "browse"],
+        "readOnly": True,
+        "summary": "Open the built-in fosd Web Observability Console in default browser",
+        "usage": "fos open [--print] [--port 7622] [--json]",
+        "flags": [
+            {"name": "--print", "type": "bool", "default": "false", "desc": "print resolved URL without opening browser"},
+            {"name": "--port", "type": "int", "default": "7622", "desc": "local fosd port when running in local mode"},
+            {"name": "--json", "type": "bool", "default": "false", "desc": "JSON output"},
+        ],
+    },
 ]
 
 
