@@ -321,10 +321,11 @@ def query_snapshot_recall(
         if nid in valid_map
     ]
 
-    # RRF Fusion across active channels
-    rrf_k = 60.0
+    # RRF Fusion across active channels (rrf_k=20 keeps top semantic/FTS ranks sharp in personal brains)
+    rrf_k = 20.0
     rrf_scores: dict[str, float] = {}
     channels: dict[str, list[str]] = {}
+    vec_sim_map: dict[str, float] = {nid: max(0.0, min(1.0, float(sc))) for nid, sc in vec_hits}
 
     def _add_channel(name: str, ranked: list[tuple[str, float]], weight: float = 1.0) -> None:
         for idx, (nid, _raw) in enumerate(ranked):
@@ -361,10 +362,13 @@ def query_snapshot_recall(
     for nid in top_ids:
         node = valid_map[nid]
         norm_rrf = rrf_scores[nid] / max_rrf
-        rr = rerank_scores.get(nid, norm_rrf)
+        lex_rr = rerank_scores.get(nid, 0.0)
+        # Preserve neural vector similarity for cross-lingual queries where lexical overlap is 0
+        sem_rr = vec_sim_map.get(nid, 0.0)
+        rr = max(lex_rr, 0.85 * sem_rr) if lex_rr > 0 else sem_rr
         salience = severity_weight(node.severity) * (1.0 + math.log(1.0 + max(1, node.seen_count))) * recency_weight(node.valid_from, ref_time)
         # Scope boost for exact project match over 'global'
-        scope_boost = 1.15 if (scope and node.scope == scope) else 1.0
+        scope_boost = 1.25 if (scope and node.scope == scope) else 1.0
         fresh = check_source_freshness(node.source_ref, node.source_hash)
         util_mult = utility_multiplier(u_stats.get(nid))
         combined = (0.55 * rr + 0.45 * norm_rrf) * salience * scope_boost * freshness_multiplier(fresh) * util_mult

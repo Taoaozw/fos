@@ -111,6 +111,8 @@ class MLXEmbedder:
     def _ensure_loaded(self) -> None:
         if self._model is not None:
             return
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
         from mlx_embeddings import load  # type: ignore[import-not-found]
 
         self._model, self._tokenizer = load(self._model_name)
@@ -127,7 +129,9 @@ class MLXEmbedder:
             self._ensure_loaded()
             from mlx_embeddings import generate  # type: ignore[import-not-found]
 
-            output = generate(self._model, self._tokenizer, texts=texts)
+            is_e5 = "e5" in self._model_name.lower()
+            prepared = [f"query: {t}" if (is_e5 and not t.startswith(("query:", "passage:"))) else t for t in texts]
+            output = generate(self._model, self._tokenizer, texts=prepared)
             embs = getattr(output, "text_embeds", output)
             rows = embs.tolist() if hasattr(embs, "tolist") else [list(r) for r in embs]
             normed: list[list[float]] = []
