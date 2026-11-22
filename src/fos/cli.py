@@ -356,13 +356,15 @@ def build_parser() -> _StrictArgumentParser:
     p_pat = sub.add_parser(
         "pattern",
         aliases=["pat"],
-        help="Store or list timeless high-performance code patterns (L1 invariant + symbol-anchored L2 + SemVer compat)",
+        help="Store, list, or evolve timeless high-performance code patterns (L1 invariant + symbol-anchored L2 + SemVer compat)",
     )
-    p_pat.add_argument("action", nargs="?", default="list", choices=["add", "list"])
-    p_pat.add_argument("target", nargs="?", default=None, help="File path with optional ::Symbol or ::Lstart-Lend (for add)")
+    p_pat.add_argument("action", nargs="?", default="list", choices=["add", "list", "sync"])
+    p_pat.add_argument("target", nargs="?", default=None, help="File[::Symbol] (for add) or NODE_ID (for sync)")
     p_pat.add_argument("rule", nargs="?", default=None, help="Concise timeless design invariant / optimization essence (for add)")
-    p_pat.add_argument("--why", dest="rationale", type=str, default="", help="First-principles structural rationale / perf benefit")
-    p_pat.add_argument("--bench", dest="bench_cmd", type=str, default="", help="Verification test/benchmark command")
+    p_pat.add_argument("--rule", dest="rule_override", type=str, default=None, help="Updated invariant/rule when running sync")
+    p_pat.add_argument("--why", dest="rationale", type=str, default=None, help="First-principles rationale / what improved or was fixed")
+    p_pat.add_argument("--bench", dest="bench_cmd", type=str, default=None, help="Verification test/benchmark command")
+    p_pat.add_argument("--supersedes", type=str, default=None, help="Old pattern node ID superseded by this improved v2 pattern")
     p_pat.add_argument("--scope", type=str, default=None, help="Project scope (auto-detected from target repo if omitted)")
     p_pat.add_argument("--severity", type=str, default="P1", choices=["P0", "P1", "P2"])
     p_pat.add_argument("--kind", type=str, default="decision", choices=["decision", "lesson", "principle"])
@@ -616,20 +618,35 @@ def run_cli(argv: list[str] | None = None) -> int:
             elif args.action == "add":
                 if not args.target or not args.rule:
                     raise UsageError(
-                        'Usage: fos pattern add <file[::symbol]> "<timeless invariant>" [--why "..."] [--bench "..."]'
+                        'Usage: fos pattern add <file[::symbol]> "<timeless invariant>" [--why "..."] [--bench "..."] [--supersedes ID]'
                     )
                 entities = [e.strip() for e in args.entities.split(",") if e.strip()] if args.entities else None
                 stack_override = parse_stack_param(args.stack) if args.stack else None
                 result = client.add_pattern(
                     args.target,
                     args.rule,
-                    rationale=args.rationale,
-                    bench_cmd=args.bench_cmd,
+                    rationale=args.rationale or "",
+                    bench_cmd=args.bench_cmd or "",
                     scope=args.scope,
                     severity=args.severity,
                     kind=args.kind,
+                    supersedes=args.supersedes,
                     entities=entities,
                     trigger_when=args.trigger,
+                    stack_override=stack_override,
+                    max_lines=args.max_lines,
+                )
+            elif args.action == "sync":
+                if not args.target:
+                    raise UsageError(
+                        'Usage: fos pattern sync <NODE_ID> [--rule "..."] [--why "..."] [--bench "..."] [--json]'
+                    )
+                stack_override = parse_stack_param(args.stack) if args.stack else None
+                result = client.sync_pattern(
+                    args.target,
+                    rule=args.rule_override or args.rule,
+                    rationale=args.rationale,
+                    bench_cmd=args.bench_cmd,
                     stack_override=stack_override,
                     max_lines=args.max_lines,
                 )

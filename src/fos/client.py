@@ -918,6 +918,7 @@ class FosClient:
         scope: str | None = None,
         severity: str = "P1",
         kind: str = "decision",
+        supersedes: str | None = None,
         entities: list[str] | None = None,
         trigger_when: list[str] | None = None,
         stack_override: dict[str, str] | None = None,
@@ -992,6 +993,7 @@ class FosClient:
             content="\n".join(l2_lines),
             scope=resolved_scope,
             source="manual:pattern",
+            supersedes=supersedes,
             severity=severity,
             entities=ent_list or None,
             trigger_when=trigger_when,
@@ -1002,6 +1004,79 @@ class FosClient:
             rationale=rationale.strip(),
             compat=compat,
         )
+
+    def sync_pattern(
+        self,
+        node_id: str,
+        *,
+        rule: str | None = None,
+        rationale: str | None = None,
+        bench_cmd: str | None = None,
+        stack_override: dict[str, str] | None = None,
+        max_lines: int = 45,
+    ) -> dict[str, Any]:
+        """Re-slice an existing code exemplar from disk and supersede it with an evolved vN+1 node."""
+        from fos.code_pattern import detect_repo_stack_versions, extract_code_symbol
+
+        detail = self.get(node_id, tier="L1")
+        old = detail.get("node") or {}
+        source_ref = str(old.get("source_ref") or "").strip()
+        if not source_ref:
+            raise UsageError(f"Node {node_id} has no source_ref to sync from.")
+
+        raw_path, sep, symbol = source_ref.partition("::")
+        file_path = Path(raw_path).expanduser().resolve()
+        sym = symbol.strip() if sep else ""
+        if not file_path.is_file():
+            raise NotFoundError(f"Source file for {node_id} no longer exists: {file_path}")
+
+        extracted = extract_code_symbol(file_path, sym, max_lines=max_lines)
+        if not extracted.get("found"):
+            raise NotFoundError(str(extracted.get("error") or f"Symbol '{sym}' not found in {file_path.name}"))
+
+        old_compat = dict(old.get("compat") or {})
+        old_stack = dict(old_compat.get("stack") or {})
+        detected_stack, _ = detect_repo_stack_versions(file_path)
+        new_stack = dict(detected_stack)
+        if stack_override:
+            new_stack.update(stack_override)
+
+        new_rule = (rule if rule is not None and rule.strip() else str(old.get("rule") or "")).strip()
+        new_rationale = (rationale if rationale is not None else str(old.get("rationale") or "")).strip()
+        new_bench = (bench_cmd if bench_cmd is not None else str(old_compat.get("bench_cmd") or "")).strip()
+
+        no_change = (
+            str(extracted.get("hash") or "") == str(old.get("source_hash") or "")
+            and new_stack == old_stack
+            and new_rule == str(old.get("rule") or "").strip()
+            and new_rationale == str(old.get("rationale") or "").strip()
+            and new_bench == str(old_compat.get("bench_cmd") or "").strip()
+        )
+        if no_change:
+            return {
+                "changed": False,
+                "node_id": node_id,
+                "source_ref": source_ref,
+                "freshness": "fresh",
+                "note": "No changes detected in anchored symbol, stack versions, or metadata.",
+            }
+
+        res = self.add_pattern(
+            source_ref,
+            new_rule,
+            rationale=new_rationale,
+            bench_cmd=new_bench,
+            scope=str(old.get("scope") or "global"),
+            severity=str(old.get("severity") or "P1"),
+            kind=str(old.get("type") or "decision"),
+            supersedes=node_id,
+            entities=list(old.get("entities") or []) or None,
+            trigger_when=list(old.get("trigger_when") or []) or None,
+            stack_override=stack_override,
+            max_lines=max_lines,
+        )
+        res["changed"] = True
+        return res
 
     def list_patterns(
         self,

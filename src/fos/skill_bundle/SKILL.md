@@ -17,7 +17,8 @@ AI-native cognitive memory CLI backed by an always-on M3 Max brain (`fosd`) with
 | Pre-decision mirror check | `fos mirror "<proposal>" [--scope P] --json` |
 | Verbatim L2 evidence & graph | `fos get <ID> --tier L2 --graph --json` |
 | Record pitfall / decision | `fos add --kind lesson\|decision\|principle --scope P "<content>" --json` |
-| Save high-perf code pattern | `fos pattern add <file[::symbol]> "<timeless invariant>" --why "<benefit>" --bench "<cmd>" --json` |
+| Save / evolve code pattern | `fos pattern add <file[::symbol]> "<invariant>" [--supersedes ID] --why "<benefit>" --bench "<cmd>" --json` |
+| Sync drifted code pattern | `fos pattern sync <ID> [--why "<fix or perf gain>"] --json` |
 | Self-correct wrong/outdated rule | `fos correct <ID> "<refined rule>" --reason "<why>" --json` |
 | Retire obsolete/guarded rule | `fos archive <ID> --reason "<why>" --json` |
 | Flush outbox & refresh cache | `fos sync --json` |
@@ -36,6 +37,8 @@ AI-native cognitive memory CLI backed by an always-on M3 Max brain (`fosd`) with
 
 - Before non-trivial architecture changes, migrations, or production scripts: run `fos mirror "<plan>" --scope <repo> --json` and address any `conflicts` or `lesson_warnings`.
 - **Self-correct aggressively**: if a recalled rule is contradicted by current code/tests, run `fos correct <ID> "<new rule>" --reason "..."`; if obsolete or already enforced by a permanent Guard Test, run `fos archive <ID> --reason "..."`.
-- **Code patterns & SemVer drift**: when a recalled code exemplar has `compat_check.status == "major_drift"`, preserve the timeless design invariant from `rule`, read the L2 skeleton or `source_ref` for reference, and adapt framework APIs to the target repo's current version rather than copying old syntax verbatim.
+- **Code patterns are baselines, not gospel**: when recalling a `code_exemplar`, critically review the L2 skeleton / `source_ref` before reusing it — check for subtle leaks, races, or cleaner native APIs in newer framework versions (especially when `compat_check.status == "major_drift"` or `freshness == "drifted"`).
+  - If the old pattern has a real bug or is now an anti-pattern: never silently delete it — demote it into a warning lesson via `fos add --kind lesson --supersedes <ID> "<what broke & what to do instead>"` and mark `fos feedback <ID> --noise`.
+  - If you fixed or further optimized it: evolve the baseline via `fos pattern sync <ID> --why "..."` (in-place) or `fos pattern add <new_file::sym> "..." --supersedes <ID>` (new repo/symbol), and record `fos feedback <ID> --useful` once verified.
 - **6-Month Half-Life**: only record durable principles, engineering pitfalls, or architectural trade-offs — never one-off ticket/account trivia.
 - Never pass raw passwords, private keys, or API tokens to `fos add` (secret redaction is a fallback safety net, not a license).

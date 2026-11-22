@@ -209,3 +209,104 @@ def test_cli_pattern_add_and_list(tmp_path: Path, capsys) -> None:
     assert rc3 == 0
     desc = json.loads(capsys.readouterr().out)
     assert desc["name"] == "pattern"
+
+
+def test_pattern_sync_evolution_and_antipattern_demotion(tmp_path: Path, capsys) -> None:
+    home = tmp_path / "fos_evolve"
+    save_config(FosConfig(mode="local", device="test"), home)
+    client = FosClient(home=home)
+
+    kt_v1 = _sample_kotlin_repo(tmp_path / "gw-v1", spring_boot_ver="3.3.5", kotlin_ver="2.1.0")
+    added = client.add_pattern(
+        f"{kt_v1}::DetachableBody",
+        "WebFlux 流式代理用无锁 BaseSubscriber<DataBuffer> 零拷贝透传",
+        rationale="v1 初始实现",
+    )
+    id_v1 = added["node"]["id"]
+
+    # 1. Sync when nothing changed -> idempotent no-op
+    noop = client.sync_pattern(id_v1)
+    assert noop["changed"] is False
+    assert noop["freshness"] == "fresh"
+
+    # 2. Optimize the symbol in-place -> drifted -> sync evolves to v2 superseding v1
+    kt_v1.write_text(
+        kt_v1.read_text(encoding="utf-8").replace("return x + 1", "return x + 2 // zero-alloc fast path"),
+        encoding="utf-8",
+    )
+    assert check_source_freshness(added["node"]["source_ref"], added["node"]["source_hash"]) == "drifted"
+
+    rc_sync = run_cli(
+        [
+            "--home",
+            str(home),
+            "pattern",
+            "sync",
+            id_v1,
+            "--why",
+            "消除热路径额外分配，0 B/op",
+            "--json",
+        ]
+    )
+    assert rc_sync == 0
+    synced = json.loads(capsys.readouterr().out)
+    assert synced["changed"] is True
+    assert synced["superseded"] == id_v1
+    id_v2 = synced["node"]["id"]
+    assert id_v2 != id_v1
+    assert synced["node"]["rationale"] == "消除热路径额外分配，0 B/op"
+
+    # v1 is now superseded; only v2 is active and fresh with updated L2 skeleton
+    old_detail = client.get(id_v1, tier="L1")
+    assert old_detail["node"]["status"] == "superseded"
+    assert old_detail["node"]["superseded_by"] == id_v2
+
+    new_detail = client.get(id_v2, tier="L2", include_graph=True)
+    assert "zero-alloc fast path" in new_detail["evidence"][0]["raw"]
+    assert any(e["edge_type"] == "SUPERSEDES" and e["dst_id"] == id_v1 for e in new_detail["graph"])
+
+    # 3. Cross-repo evolution via `pattern add --supersedes`
+    kt_v3 = _sample_kotlin_repo(tmp_path / "gw-v3", spring_boot_ver="4.1.1", kotlin_ver="2.4.21")
+    rc_v3 = run_cli(
+        [
+            "--home",
+            str(home),
+            "pattern",
+            "add",
+            f"{kt_v3}::DetachableBody",
+            "WebFlux 4.1 零拷贝透传使用新版原生排空接口",
+            "--supersedes",
+            id_v2,
+            "--why",
+            "在 Spring Boot 4.1 中进一步简化状态机",
+            "--json",
+        ]
+    )
+    assert rc_v3 == 0
+    out_v3 = json.loads(capsys.readouterr().out)
+    assert out_v3["superseded"] == id_v2
+    id_v3 = out_v3["node"]["id"]
+
+    # Active patterns list only shows the latest evolved v3 (v1 & v2 cleanly retired)
+    plist = client.list_patterns()
+    assert plist["count"] == 1
+    assert plist["patterns"][0]["id"] == id_v3
+    assert plist["patterns"][0]["freshness"] == "fresh"
+
+    # 4. If a pattern turns out to have a fatal bug -> demote into anti-pattern lesson superseding v3
+    demoted = client.add(
+        kind="lesson",
+        scope="gw-v3",
+        severity="P0",
+        supersedes=id_v3,
+        content="禁止在 cancel 回调里同步调用 requestUnbounded，会导致重入栈溢出；改用异步排空",
+    )
+    assert demoted["superseded"] == id_v3
+    assert client.list_patterns()["count"] == 0
+    assert client.get(id_v3)["node"]["status"] == "superseded"
+    # Rebuild preserves the full evolution & demotion chain
+    client.rebuild()
+    assert client.get(id_v1)["node"]["status"] == "superseded"
+    assert client.get(id_v2)["node"]["status"] == "superseded"
+    assert client.get(id_v3)["node"]["status"] == "superseded"
+    assert client.get(demoted["node"]["id"])["node"]["status"] == "active"
