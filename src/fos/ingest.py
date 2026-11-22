@@ -1,15 +1,18 @@
-"""Passive Episode-level Hindsight collectors for Antigravity, Claude Code, Codex, Pi, and fops traces.
+"""High-compounding Hindsight collectors: Git fix/revert commits + User Taste/Decision episodes.
 
-Follows SOTA sleep-time memory practices (Hindsight / Songe / Claude Auto Dream):
-- Filters transient tool glitches upfront (edit uniqueness mismatches, bare Exit code 1, interrupted calls).
-- Captures full (Context + Problem -> Resolution) episodes by looking forward 1-5 turns for root cause & fix.
-- Deduplicates within debugging bursts and tracks incremental per-file line cursors.
+First-principles design (modeled on fops LESSONS.md + Songe + Hindsight):
+- `git`: mines verified `fix(...)` / `revert` / `perf(...)` commits across repos (with per-repo
+  `reviewed_through` SHA cursor) — already verified root causes, zero chat chatter.
+- `antigravity | claude | codex | pi`: focuses strictly on high-compounding human signals
+  (user taste/workflow corrections & explicit architectural trade-offs) instead of scraping
+  one-off HTTP 4xx/5xx firefighting tickets or transient tool errors.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,23 +22,34 @@ from fos.errors import UsageError
 from fos.models import now_iso, parse_timestamp
 from fos.redact import redact_secrets
 
-VALID_SOURCES = ("antigravity", "claude", "codex", "pi", "fops")
+VALID_SOURCES = ("git", "antigravity", "claude", "codex", "pi", "fops")
 ALL_SOURCES_ALIAS = "all"
 
-# Hindsight signal patterns: corrections, concrete errors, explicit decisions
-_CORRECTION_RE = re.compile(
-    r"(?:不对|不是这样|不要用|禁止|别用|搞错了|纠正|记住|以后不要|下次不要|踩坑|应该用|改用|换成|不要再|"
-    r"actually\b|instead of\b|wrong\b|don't use\b|never use\b|do not use\b|remember to\b|lesson learned|root cause)",
-    re.IGNORECASE,
-)
-_ERROR_RE = re.compile(
-    r"(?:traceback \(most recent|exception:|exit code [1-9]|exited with code [1-9]|fatal:|"
-    r"unrecognized option|unknown option|permission denied|command failed|报错|失败中断|400|403|404|500|502|503)",
+# High-compounding human correction / taste / principle signals (NOT one-off ops tickets)
+_TASTE_CORRECTION_RE = re.compile(
+    r"(?:不要用|不要做|不要再|不要\s*[a-zA-Z]{2,}|别用|禁止|严禁|以后不要|下次不要|我希望(?:他|它)?是|"
+    r"偏好|第一性原理|过度抽象|太重了|参考.{1,15}(?:思路|做法|设计)|从.{1,10}出发|应该用|统一用|一律用|改用|换成|"
+    r"never use\b|do not use\b|don't use\b|instead of\b|i prefer\b|stop doing\b|remember to\b|lesson learned|root cause)",
     re.IGNORECASE,
 )
 _DECISION_RE = re.compile(
-    r"(?:决定|最终选择|选型|架构方案|放弃.*改用|改用.*替代|统一用|一律用|"
+    r"(?:决定采用|最终选择|架构选型|放弃.{1,20}改用|改用.{1,20}替代|选型结论|设计原则|权衡|trade-?off|"
     r"decided to\b|we will use\b|architecture decision|chosen to\b)",
+    re.IGNORECASE,
+)
+# Exclude one-off account/ticket operational chatter from chat sessions
+_OPS_TICKET_NOISE_RE = re.compile(
+    r"(?:帮我把|帮我查|帮我看下|这个账号|那个账号|上号失败|换成.{1,12}的账号|cookie\s*复用|报\s*40[034]|返回\s*40[034]|为什么一直返回)",
+    re.IGNORECASE,
+)
+
+# Git commit prefixes that carry verified engineering rework / pitfall lessons (per fops LESSONS.md)
+_GIT_LESSON_SUBJECT_RE = re.compile(
+    r"^(?:fix|revert|perf)(?:\([^)]+\))?!?:\s+.{10,}",
+    re.IGNORECASE,
+)
+_GIT_TRIVIAL_RE = re.compile(
+    r"(?:typo|format|lint|whitespace|bump version|merge branch|wip\b)",
     re.IGNORECASE,
 )
 
@@ -58,17 +72,6 @@ _NOISE_SUBSTRINGS = (
     "encountered error in step execution: file does not exist",
     "the user doesn't want to proceed with this tool use",
     "the tool call was rejected by the user",
-)
-
-# Transient tool glitches that have zero cross-session reusable value
-_TRANSIENT_TOOL_PATTERNS = (
-    re.compile(r"oldtext must be unique|the text must be unique|found \d+ occurrences of", re.IGNORECASE),
-    re.compile(r"not a git repository", re.IGNORECASE),
-    re.compile(r"^ls: .*: no such file or directory", re.IGNORECASE),
-    re.compile(r"tool call was interrupted before a result was received", re.IGNORECASE),
-    re.compile(r"is temporarily unavailable \(timed out\)", re.IGNORECASE),
-    re.compile(r"^tool error:\s*exit code \d+\s*$", re.IGNORECASE),
-    re.compile(r"^tool error:\s*<tool_use_error>error: no such tool available:", re.IGNORECASE),
 )
 
 
@@ -114,39 +117,25 @@ def _strip_boilerplate(text: str) -> str:
     for sub in _NOISE_SUBSTRINGS:
         if sub in low:
             return ""
-    if len(cleaned) > 3000:
+    if len(cleaned) > 2000:
         return ""
     return cleaned
 
 
-def _is_transient_tool_noise(text: str, *, role: str, is_err: bool) -> bool:
-    """Filter fleeting tool/environment glitches so they never pollute long-term memory."""
-    compact = " ".join(text.strip().split())
-    if not compact:
-        return True
-    for pat in _TRANSIENT_TOOL_PATTERNS:
-        if pat.search(compact):
-            return True
-    # Bare shell exit codes with no informative message
-    if is_err and role in ("tool", "action") and len(compact) < 28:
-        return True
-    return False
-
-
-def _classify_hindsight(text: str, *, role: str = "user", is_error_event: bool = False) -> tuple[str, str] | None:
-    """Return (kind, severity) if turn carries hindsight signal, else None."""
+def _classify_chat_signal(text: str, *, role: str) -> tuple[str, str] | None:
+    """Classify only high-compounding user corrections, taste rules, and architectural decisions."""
+    if role != "user":
+        return None
     clean = _strip_boilerplate(text)
-    if len(clean) < 16:
+    if len(clean) < 12:
         return None
-    if _is_transient_tool_noise(clean, role=role, is_err=is_error_event):
+    if _OPS_TICKET_NOISE_RE.search(clean):
         return None
-    if is_error_event or _ERROR_RE.search(clean):
-        return ("lesson", "P1")
-    if _CORRECTION_RE.search(clean):
-        sev = "P0" if any(w in clean.lower() for w in ("禁止", "严禁", "never use", "must not")) else "P1"
-        return ("lesson", sev)
     if _DECISION_RE.search(clean):
         return ("decision", "P1")
+    if _TASTE_CORRECTION_RE.search(clean):
+        is_hard = any(w in clean.lower() for w in ("禁止", "严禁", "不要 mcp", "不要mcp", "never use", "第一性原理"))
+        return ("principle" if is_hard else "lesson", "P0" if is_hard else "P1")
     return None
 
 
@@ -166,8 +155,6 @@ def _extract_text_from_message(msg: Any) -> str:
                     btype = block.get("type")
                     if btype in ("text", "input_text", "output_text") and block.get("text"):
                         parts.append(str(block["text"]))
-                    elif btype == "tool_result" and block.get("is_error"):
-                        parts.append(f"Tool error: {block.get('content', '')}")
             return "\n".join(parts)
     return ""
 
@@ -182,7 +169,7 @@ def _infer_scope_from_path(path_str: str) -> str:
     return "global"
 
 
-def _load_cursors(cursor_path: Path) -> dict[str, int]:
+def _load_cursors(cursor_path: Path) -> dict[str, Any]:
     if not cursor_path.exists():
         return {}
     try:
@@ -191,7 +178,7 @@ def _load_cursors(cursor_path: Path) -> dict[str, int]:
         return {}
 
 
-def _save_cursors(cursor_path: Path, cursors: dict[str, int]) -> None:
+def _save_cursors(cursor_path: Path, cursors: dict[str, Any]) -> None:
     cursor_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = cursor_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(cursors, indent=2) + "\n", encoding="utf-8")
@@ -199,19 +186,11 @@ def _save_cursors(cursor_path: Path, cursors: dict[str, int]) -> None:
 
 
 def _find_resolution(turns: list[_Turn], idx: int) -> str:
-    """Look ahead 1..5 turns after a problem/correction to capture the root cause or verified fix."""
-    candidates: list[str] = []
-    for j in range(idx + 1, min(len(turns), idx + 6)):
+    for j in range(idx + 1, min(len(turns), idx + 5)):
         t = turns[j]
         if t.role == "assistant" and not t.is_err and len(t.text) >= 24:
-            candidates.append(t.text)
-            # Prefer a substantive explanation turn (diagnosis/fix) over short "Checking..." preambles
-            if len(t.text) >= 80 or any(
-                cue in t.text.lower()
-                for cue in ("原因", "因为", "根因", "修复", "解决", "改用", "root cause", "fixed", "resolved", "because")
-            ):
-                return t.text[:450]
-    return candidates[-1][:450] if candidates else ""
+            return t.text[:400]
+    return ""
 
 
 def _find_prev_context(turns: list[_Turn], idx: int) -> str:
@@ -222,6 +201,150 @@ def _find_prev_context(turns: list[_Turn], idx: int) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Git Fix/Revert Commit Collector (modeled on fops LESSONS.md reviewed-through)
+# ---------------------------------------------------------------------------
+
+
+def _discover_git_repos(root_dir: Path | None) -> list[Path]:
+    if root_dir is not None:
+        base = Path(root_dir).expanduser().resolve()
+        if (base / ".git").exists():
+            return [base]
+        if base.is_dir():
+            return sorted(p.parent for p in base.glob("*/.git") if p.parent.is_dir())
+        return []
+
+    # Default: current git repo if inside one, else scan ~/project/clive (or ~/project)
+    cwd = Path.cwd().resolve()
+    for cand in (cwd, *cwd.parents):
+        if (cand / ".git").exists():
+            return [cand]
+    for fallback in (Path.home() / "project" / "clive", Path.home() / "projects" / "clive"):
+        if fallback.is_dir():
+            repos = sorted(p.parent for p in fallback.glob("*/.git") if p.parent.is_dir())
+            if repos:
+                return repos
+    return []
+
+
+def _collect_git_fix_events(
+    *,
+    since: str | None,
+    root_dir: Path | None,
+    cursor_path: Path | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    repos = _discover_git_repos(root_dir)
+    if not repos:
+        return []
+
+    cutoff = parse_since_duration(since)
+    cursors = _load_cursors(cursor_path) if cursor_path else {}
+    events: list[dict[str, Any]] = []
+    sep = "\x1e"
+    rec_sep = "\x1f"
+
+    for repo in repos:
+        if len(events) >= limit:
+            break
+        ckey = f"git:{repo.resolve()}"
+        reviewed_sha = str(cursors.get(ckey) or "")
+
+        cmd = [
+            "git",
+            "-C",
+            str(repo),
+            "log",
+            "--no-merges",
+            f"--format=%H{rec_sep}%cI{rec_sep}%s{rec_sep}%b{sep}",
+            "-n",
+            "80",
+        ]
+        if reviewed_sha:
+            cmd.append(f"{reviewed_sha}..HEAD")
+        elif cutoff is not None:
+            cmd.append(f"--since={cutoff.isoformat()}")
+
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
+            if proc.returncode != 0:
+                continue
+        except (OSError, subprocess.SubprocessError):
+            continue
+
+        head_proc = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        head_sha = head_proc.stdout.strip() if head_proc.returncode == 0 else ""
+
+        records = [r.strip() for r in proc.stdout.split(sep) if r.strip()]
+        scope = repo.name.lower()
+
+        for rec in records:
+            if len(events) >= limit:
+                break
+            parts = rec.split(rec_sep, 3)
+            if len(parts) < 3:
+                continue
+            sha, ts, subject = parts[0].strip(), parts[1].strip(), parts[2].strip()
+            body = parts[3].strip() if len(parts) > 3 else ""
+
+            if not _GIT_LESSON_SUBJECT_RE.match(subject) or _GIT_TRIVIAL_RE.search(subject):
+                continue
+
+            # Fetch compact changed-file list for technical context
+            files_proc = subprocess.run(
+                ["git", "-C", str(repo), "show", "--stat", "--format=", sha],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            stat_lines = [l.strip() for l in files_proc.stdout.splitlines() if l.strip()][:6]
+
+            text_parts = [f"Hindsight: {subject}"]
+            if body:
+                text_parts.append(f"Resolution: {body[:500]}")
+            if stat_lines:
+                text_parts.append(f"Context: touched files: {'; '.join(stat_lines)}")
+            raw = "\n".join(text_parts)
+            red = redact_secrets(raw)
+
+            events.append(
+                {
+                    "kind": "lesson",
+                    "scope": scope,
+                    "source": f"hindsight:git:{repo.name}",
+                    "raw": red.text,
+                    "ts": ts or now_iso(),
+                    "meta": {
+                        "severity": "P1",
+                        "collector": "git",
+                        "evidence_ref": f"git:{sha[:7]}",
+                        "commit_sha": sha,
+                        "redacted_types": list(red.redacted_types),
+                    },
+                }
+            )
+
+        if head_sha:
+            cursors[ckey] = head_sha
+
+    if cursor_path is not None:
+        _save_cursors(cursor_path, cursors)
+    return events
+
+
+# ---------------------------------------------------------------------------
+# Main Collector Entrypoint
+# ---------------------------------------------------------------------------
+
+
 def collect_hindsight_events(
     source: str,
     *,
@@ -230,7 +353,7 @@ def collect_hindsight_events(
     cursor_path: Path | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """Scan local AI/tool traces and extract high-signal (Context + Problem -> Resolution) episodes."""
+    """Collect high-compounding hindsight signals from git fixes or AI agent sessions."""
     if source == ALL_SOURCES_ALIAS:
         all_events: list[dict[str, Any]] = []
         per_src_limit = max(1, limit)
@@ -250,6 +373,9 @@ def collect_hindsight_events(
         raise UsageError(
             f"Invalid ingest source '{source}'. Must be one of: {', '.join(VALID_SOURCES)}, all"
         )
+
+    if source == "git":
+        return _collect_git_fix_events(since=since, root_dir=root_dir, cursor_path=cursor_path, limit=limit)
 
     cutoff = parse_since_duration(since)
     cursors = _load_cursors(cursor_path) if cursor_path else {}
@@ -282,7 +408,7 @@ def collect_hindsight_events(
             continue
 
         key = str(fpath.resolve())
-        start_line = cursors.get(key, 0)
+        start_line = int(cursors.get(key, 0) or 0)
         last_line = start_line
         session_scope = "global"
         session_id_hint = fpath.stem
@@ -341,21 +467,23 @@ def collect_hindsight_events(
         except OSError:
             continue
 
-        # Extract episodes with burst cooldown (skip overlapping signals within 3 turns)
         last_emitted_idx = -10
         for idx, turn in enumerate(turns):
             if len(events) >= limit:
                 break
             if idx - last_emitted_idx < 3:
                 continue
-            if turn.role == "assistant" and not turn.is_err:
-                continue
 
-            verdict = _classify_hindsight(turn.text, role=turn.role, is_error_event=turn.is_err)
-            if verdict is None:
-                continue
+            if source == "fops":
+                if not turn.is_err:
+                    continue
+                kind, severity = ("lesson", "P1")
+            else:
+                verdict = _classify_chat_signal(turn.text, role=turn.role)
+                if verdict is None:
+                    continue
+                kind, severity = verdict
 
-            kind, severity = verdict
             prev_ctx = _find_prev_context(turns, idx)
             resolution = _find_resolution(turns, idx)
 
@@ -402,10 +530,8 @@ def _extract_record_by_source(
     session_scope: str,
     session_id_hint: str,
 ) -> tuple[str, str, str, bool, str] | None:
-    """Normalize a single log line into (role, text, scope, is_error, session_id)."""
     if source == "antigravity":
         rtype = str(obj.get("type", ""))
-        status = str(obj.get("status", ""))
         content = str(obj.get("content") or "")
         session_id = fpath.parent.parent.parent.name
         if rtype == "USER_INPUT":
@@ -416,22 +542,15 @@ def _extract_record_by_source(
                 return None
             return ("user", content, session_scope, False, session_id)
         if rtype == "PLANNER_RESPONSE":
-            return ("assistant", content, session_scope, status == "ERROR", session_id)
-        if status == "ERROR" and content:
-            return ("tool", content, session_scope, True, session_id)
+            return ("assistant", content, session_scope, False, session_id)
         return None
 
     if source == "claude":
         rtype = str(obj.get("type", ""))
         session_id = str(obj.get("sessionId") or fpath.stem)
         scope = _infer_scope_from_path(str(obj.get("cwd") or ""))
-        if rtype == "user":
-            text = _extract_text_from_message(obj.get("message"))
-            is_err = "Tool error:" in text
-            return ("user", text, scope, is_err, session_id)
-        if rtype == "assistant":
-            text = _extract_text_from_message(obj.get("message"))
-            return ("assistant", text, scope, False, session_id)
+        if rtype in ("user", "assistant"):
+            return (rtype, _extract_text_from_message(obj.get("message")), scope, False, session_id)
         return None
 
     if source == "codex":
@@ -442,20 +561,14 @@ def _extract_record_by_source(
         if rtype == "response_item":
             ptype = str(payload.get("type", ""))
             role = str(payload.get("role") or "")
-            if ptype == "message" and role in ("user", "assistant"):
+            if ptype in ("message", "") and role in ("user", "assistant"):
                 text = _extract_text_from_message(payload) or str(payload.get("text") or "")
                 return (role, text, scope, False, session_id)
-            if ptype == "" and role in ("user", "assistant"):
-                text = _extract_text_from_message(payload) or str(payload.get("text") or "")
-                is_err = bool(payload.get("exit_code") not in (None, 0) or payload.get("is_error"))
-                return (role, text, scope, is_err, session_id)
         elif rtype in ("event_msg", "message"):
             role = str(payload.get("role") or "user")
-            if role == "developer":
-                return None
-            text = _extract_text_from_message(payload) or str(payload.get("text") or payload.get("message") or "")
-            is_err = bool(payload.get("exit_code") not in (None, 0) or payload.get("is_error"))
-            return (role, text, scope, is_err, session_id)
+            if role in ("user", "assistant"):
+                text = _extract_text_from_message(payload) or str(payload.get("text") or payload.get("message") or "")
+                return (role, text, scope, False, session_id)
         return None
 
     if source == "pi":
@@ -465,15 +578,8 @@ def _extract_record_by_source(
         if not isinstance(msg, dict):
             return None
         role = str(msg.get("role") or "")
-        if role == "system":
-            return None
-        text = _extract_text_from_message(msg)
-        if role == "toolResult":
-            if not msg.get("isError"):
-                return None
-            return ("tool", text, session_scope, True, session_id_hint)
         if role in ("user", "assistant"):
-            return (role, text, session_scope, False, session_id_hint)
+            return (role, _extract_text_from_message(msg), session_scope, False, session_id_hint)
         return None
 
     # fops structured trajectory jsonl

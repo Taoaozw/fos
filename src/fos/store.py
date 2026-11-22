@@ -134,10 +134,12 @@ class SnapshotDB:
                 valid_until TEXT,
                 superseded_by TEXT,
                 seen_count INTEGER NOT NULL DEFAULT 1,
+                seen_dates_json TEXT NOT NULL DEFAULT '[]',
                 confidence REAL NOT NULL DEFAULT 0.8,
                 l0 TEXT NOT NULL,
                 rule TEXT NOT NULL,
                 rationale TEXT NOT NULL DEFAULT '',
+                guard_hint TEXT NOT NULL DEFAULT '',
                 trigger_when_json TEXT NOT NULL DEFAULT '[]',
                 entities_json TEXT NOT NULL DEFAULT '[]',
                 contradicts_json TEXT NOT NULL DEFAULT '[]',
@@ -189,6 +191,12 @@ class SnapshotDB:
 
         cur.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)", (SCHEMA_VERSION,))
         cur.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('embedding_dim', ?)", (str(self.embedding_dim),))
+        # Idempotent migration for pre-existing snapshots missing new columns
+        existing_cols = {str(r["name"]) for r in cur.execute("PRAGMA table_info(nodes)").fetchall()}
+        if "seen_dates_json" not in existing_cols:
+            cur.execute("ALTER TABLE nodes ADD COLUMN seen_dates_json TEXT NOT NULL DEFAULT '[]'")
+        if "guard_hint" not in existing_cols:
+            cur.execute("ALTER TABLE nodes ADD COLUMN guard_hint TEXT NOT NULL DEFAULT ''")
         self.conn.commit()
 
     def set_meta(self, key: str, value: str) -> None:
@@ -210,6 +218,7 @@ class SnapshotDB:
             return {}
 
     def _row_to_node(self, row: sqlite3.Row) -> CompiledNode:
+        keys = row.keys()
         return CompiledNode(
             id=str(row["id"]),
             type=str(row["type"]),
@@ -220,10 +229,12 @@ class SnapshotDB:
             valid_until=row["valid_until"],
             superseded_by=row["superseded_by"],
             seen_count=int(row["seen_count"]),
+            seen_dates=json.loads(row["seen_dates_json"]) if "seen_dates_json" in keys else [],
             confidence=float(row["confidence"]),
             l0=str(row["l0"]),
             rule=str(row["rule"]),
             rationale=str(row["rationale"]),
+            guard_hint=str(row["guard_hint"]) if "guard_hint" in keys else "",
             trigger_when=json.loads(row["trigger_when_json"]),
             entities=json.loads(row["entities_json"]),
             contradicts=json.loads(row["contradicts_json"]),
@@ -256,10 +267,10 @@ class SnapshotDB:
             """
             INSERT OR REPLACE INTO nodes (
                 id, type, scope, status, severity, valid_from, valid_until,
-                superseded_by, seen_count, confidence, l0, rule, rationale,
-                trigger_when_json, entities_json, contradicts_json, evidence_ids_json,
+                superseded_by, seen_count, seen_dates_json, confidence, l0, rule, rationale,
+                guard_hint, trigger_when_json, entities_json, contradicts_json, evidence_ids_json,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 node.id,
@@ -271,10 +282,12 @@ class SnapshotDB:
                 node.valid_until,
                 node.superseded_by,
                 node.seen_count,
+                json.dumps(node.seen_dates, ensure_ascii=False),
                 node.confidence,
                 node.l0,
                 node.rule,
                 node.rationale,
+                node.guard_hint,
                 json.dumps(node.trigger_when, ensure_ascii=False),
                 json.dumps(node.entities, ensure_ascii=False),
                 json.dumps(node.contradicts, ensure_ascii=False),

@@ -159,22 +159,33 @@ def query_snapshot_boot(
     budget: int = 300,
     mode: str = "online",
 ) -> dict[str, Any]:
-    """Build <= budget token L0 wakeup kernel from any SnapshotDB (brain or offline cache)."""
-    active = db.list_nodes(scope=project, as_of=None)
+    """Build <= budget token L0 wakeup kernel from any SnapshotDB (brain or offline cache).
 
-    def _boot_rank(n: CompiledNode) -> tuple[int, int, int, str]:
-        # Priority: P0 principles/lessons > project-specific decisions > high-seen lessons > others
+    Boot discipline: never leak P2 trivia into session wakeup; global boot (project=None)
+    prioritizes cross-project principles & P0 redlines over single-repo items.
+    """
+    raw_active = db.list_nodes(scope=project, as_of=None)
+    # Exclude low-priority P2 trivia from wakeup kernel (still searchable via `fos recall`)
+    active = [n for n in raw_active if n.severity != "P2" or n.type == "principle"]
+    if project is None:
+        # Global boot: focus on global principles/decisions/lessons & P0 redlines
+        global_or_p0 = [n for n in active if n.scope == "global" or n.severity == "P0" or n.type == "principle"]
+        if global_or_p0:
+            active = global_or_p0
+
+    def _boot_rank(n: CompiledNode) -> tuple[int, int, int, int, str]:
         is_proj = 1 if (project and n.scope == project) else 0
+        is_global = 1 if n.scope == "global" else 0
         tier = 0
         if n.type == "principle" or n.severity == "P0":
             tier = 4
-        elif n.type == "decision" and is_proj:
+        elif n.type == "decision" and (is_proj or is_global):
             tier = 3
-        elif n.type == "lesson" and (n.seen_count >= 2 or n.severity == "P1"):
+        elif n.type == "lesson" and (len(n.seen_dates) >= 2 or n.seen_count >= 2 or n.severity == "P1"):
             tier = 2
         elif n.type == "decision":
             tier = 1
-        return (tier, is_proj, n.seen_count, n.valid_from)
+        return (tier, is_proj if project else is_global, len(n.seen_dates), n.seen_count, n.valid_from)
 
     active.sort(key=_boot_rank, reverse=True)
 
@@ -572,10 +583,12 @@ class BrainEngine:
             valid_until=None,
             superseded_by=None,
             seen_count=int(meta.get("seen_count", 1)),
+            seen_dates=[atom.ts[:10]] if len(atom.ts) >= 10 else [],
             confidence=float(meta.get("confidence", 0.85 if atom.source == "manual" else 0.72)),
             trigger_when=triggers,
             rule=rule,
             rationale=rationale,
+            guard_hint=str(meta.get("guard_hint") or ""),
             entities=entities,
             contradicts=list(meta.get("contradicts") or []),
             evidence_ids=[atom.id],
@@ -829,17 +842,21 @@ class BrainEngine:
                 badge = f"`{n.status}` · `{n.severity}` · `seen:{n.seen_count}` · `{n.scope}`"
                 lines.append(f"## {n.id} — {badge}")
                 lines.append("")
-                lines.append(f"- **L0**: {n.l0}")
-                lines.append(f"- **Rule**: {n.rule}")
+                lines.append(f"**{n.rule}**")
+                lines.append("")
                 if n.rationale:
-                    lines.append(f"- **Rationale**: {n.rationale}")
+                    lines.append(f"- **原因**: {n.rationale}")
+                if n.guard_hint:
+                    lines.append(f"- **守卫建议 (Guard)**: {n.guard_hint}")
                 if n.trigger_when:
-                    lines.append(f"- **Trigger When**: {', '.join(n.trigger_when)}")
-                lines.append(f"- **Valid**: `{n.valid_from}` → `{n.valid_until or 'present'}`")
+                    lines.append(f"- **触发场景**: {', '.join(n.trigger_when)}")
+                dates_str = f" ({', '.join(n.seen_dates)})" if n.seen_dates else ""
+                lines.append(f"- **复发**: Seen {n.seen_count}×{dates_str}")
+                lines.append(f"- **有效期**: `{n.valid_from}` → `{n.valid_until or 'present'}`")
                 if n.superseded_by:
-                    lines.append(f"- **Superseded By**: `{n.superseded_by}`")
+                    lines.append(f"- **已替代为**: `{n.superseded_by}`")
                 if n.evidence_ids:
-                    lines.append(f"- **Evidence**: {', '.join(f'`{e}`' for e in n.evidence_ids)}")
+                    lines.append(f"- **证据**: {', '.join(f'`{e}`' for e in n.evidence_ids)}")
                 lines.append("")
             fpath = out / fname
             fpath.write_text("\n".join(lines), encoding="utf-8")

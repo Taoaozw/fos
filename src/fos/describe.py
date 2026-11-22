@@ -104,10 +104,10 @@ COMMAND_SPECS: list[dict[str, Any]] = [
         "name": "ingest",
         "aliases": ["ing"],
         "readOnly": False,
-        "summary": "Collect hindsight signals from local AI/tool traces with incremental cursors and secret redaction",
-        "usage": "fos ingest --from antigravity|claude|codex|pi|fops|all [--since 24h] [--root DIR] [--limit 50] [--json]",
+        "summary": "Collect high-compounding hindsight signals from git fix commits and AI agent sessions",
+        "usage": "fos ingest --from git|antigravity|claude|codex|pi|fops|all [--since 24h] [--root DIR] [--limit 50] [--json]",
         "flags": [
-            {"name": "--from", "type": "string", "desc": "required source: antigravity|claude|codex|pi|fops|all"},
+            {"name": "--from", "type": "string", "desc": "required source: git|antigravity|claude|codex|pi|fops|all"},
             {"name": "--since", "type": "string", "default": "24h", "desc": "lookback duration or ISO timestamp"},
             {"name": "--root", "type": "string", "desc": "override trace directory"},
             {"name": "--limit", "type": "int", "default": "50", "desc": "max events to collect"},

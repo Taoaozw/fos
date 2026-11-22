@@ -38,25 +38,29 @@ _NOISE_PATTERNS = (
 _PROMOTE_SEEN_THRESHOLD = 3
 _DISTILL_BATCH_SIZE = 10
 
-_DISTILL_SYSTEM_PROMPT = """You are FlowOS's Sleep-Time Cognitive Distiller (inspired by Songe, Hindsight, and LESSONS.md).
-Your job is to separate reusable long-term engineering/business knowledge from one-off session noise.
+_DISTILL_SYSTEM_PROMPT = """You are FlowOS's First-Principles Cognitive Distiller (modeled on fops LESSONS.md + Songe + Hindsight).
+Apply the STRICT **6-Month Half-Life Test**: "Will this knowledge still prevent a real engineering mistake or steer a real design decision 6 months from now?"
 
-For each raw episode, decide:
-- keep = false if it is ANY of:
-  1. A transient tool glitch (edit match failure, interrupted call, temp timeout, missing local dev server).
-  2. A bare question/symptom with NO verified root cause, fix, or concrete rule.
-  3. A one-off operational request (e.g. "swap account A to B", "check this single ID") that does NOT generalize into a reusable rule or decision.
-- keep = true ONLY if it contains a reusable cross-session pitfall/rule, verified root-cause fix, workflow constraint, or architectural/business decision.
+DROP (keep = false) IMMEDIATELY if the episode is ANY of:
+1. Single-ticket ops firefighting, specific vendor/customer/account incidents, temporary third-party outages, or one-off metrics/row counts (e.g. "15 days exported 2,228 rows", "account #1928 returned 400", "OR_BACR2_59", "swap account A to B").
+2. Transient tool/environment glitches or bare questions without a durable generalizable rule.
+3. Trivial task requests that do not express a reusable preference, pitfall, or architectural trade-off.
+
+KEEP (keep = true) ONLY high-compounding, settled knowledge in 3 categories:
+1. `principle` (scope="global"): User's durable engineering taste, design philosophy, or workflow preference (e.g., "Prefer CLI + embedded Skill over MCP for local tools", "Use Guard Tests over verbal reminders").
+2. `lesson`: Generalizable technical/shell/code/architecture pitfall with a first-principles root cause (like fops LESSONS.md: e.g., "Never rely on GNU rsync --mkpath on macOS openrsync; create remote dir via ssh mkdir -p first", "Use [f]ops in pkill -f inside sh -c to avoid killing own subshell").
+3. `decision`: Deliberate architectural or stack trade-off (A chosen over B) with durable rationale.
 
 When keep = true:
-- Write `rule` as ONE crisp, actionable, bold-ready directive (in the episode's primary language, usually concise Chinese with exact English technical terms).
-- Preserve EVERY exact CLI flag (e.g. --mkpath), error code (e.g. 400, 403, 404), negation (禁止/不要/必须/never/must), and unit metric verbatim!
-- Write `rationale` as the concrete root cause or why it matters.
-- Write `trigger_when` as 2-3 short phrases describing when an AI agent should recall this rule before acting.
-- Choose `kind` in ["lesson", "decision", "principle"] and `severity` in ["P0", "P1", "P2"] (P0 only for high-impact recurring/production redlines).
+- `rule`: ONE crisp, timeless, actionable directive (no account IDs, no temporary counts, no one-off ticket numbers). Preserve ALL exact technical flags, negations (禁止/不要/必须/never/must), and durable technical constants!
+- `rationale`: First-principles WHY (structural root cause, not ticket narrative).
+- `guard_hint`: If this rule can be enforced mechanically via lint/unit-test/pre-commit/CI guard (fops LESSONS.md Rule #3), briefly state how; otherwise "".
+- `scope`: Use "global" for cross-project principles/engineering laws; keep repo name ONLY if strictly repo-specific.
+- `severity`: P0 only for universal redlines or explicit user principles; P1 for generalizable engineering lessons/decisions; P2 for narrow repo-only constraints.
+- `trigger_when`: 2-3 crisp situations when future AI should recall this before acting.
 
-Return STRICT JSON with schema:
-{"items": [{"id": "<atom_id>", "keep": true/false, "kind": "lesson|decision|principle", "severity": "P0|P1|P2", "rule": "...", "rationale": "...", "trigger_when": ["..."], "entities": ["..."], "drop_reason": "..."}]}"""
+Return STRICT JSON:
+{"items": [{"id": "<atom_id>", "keep": true/false, "kind": "principle|lesson|decision", "scope": "global|<repo>", "severity": "P0|P1|P2", "rule": "...", "rationale": "...", "guard_hint": "...", "trigger_when": ["..."], "entities": ["..."], "drop_reason": "..."}]}"""
 
 
 def _is_low_signal_noise(atom: LedgerAtom) -> bool:
@@ -166,9 +170,11 @@ def _distill_hindsight_batch(
             entry = {
                 "keep": bool(verdict.get("keep", False)),
                 "kind": str(verdict.get("kind") or atom.kind),
+                "scope": str(verdict.get("scope") or atom.scope or "global").strip().lower(),
                 "severity": str(verdict.get("severity") or atom.meta.get("severity") or "P1"),
                 "rule": str(verdict.get("rule") or "").strip(),
                 "rationale": str(verdict.get("rationale") or "").strip(),
+                "guard_hint": str(verdict.get("guard_hint") or "").strip(),
                 "trigger_when": [str(x).strip() for x in (verdict.get("trigger_when") or []) if str(x).strip()][:4],
                 "entities": [str(x).strip().lower() for x in (verdict.get("entities") or []) if str(x).strip()][:8],
                 "drop_reason": str(verdict.get("drop_reason") or "").strip(),
@@ -223,6 +229,8 @@ def _compile_dream_nodes(
     for atom in cleaned:
         meta = dict(atom.meta)
         atom_kind = atom.kind
+        atom_scope = atom.scope or "global"
+        guard_hint = str(meta.get("guard_hint") or "")
 
         # Apply LLM sleep distillation verdict if available for automated hindsight atoms
         dist = distilled_map.get(atom.id)
@@ -232,8 +240,13 @@ def _compile_dream_nodes(
                 continue
             if dist.get("kind") in VALID_KINDS:
                 atom_kind = dist["kind"]
+            if dist.get("scope"):
+                atom_scope = dist["scope"]
+            if atom_kind == "principle":
+                atom_scope = "global"
             rule = dist["rule"]
             rationale = dist.get("rationale", "")
+            guard_hint = dist.get("guard_hint", "")
             if dist.get("trigger_when"):
                 meta["trigger_when"] = dist["trigger_when"]
             if dist.get("entities"):
@@ -249,16 +262,17 @@ def _compile_dream_nodes(
 
         prefix = KIND_PREFIX.get(atom_kind, "MEM")
         entities = extract_entities(f"{rule} {rationale}", meta.get("entities"))
-        triggers = extract_triggers(rule, atom.scope, entities, meta.get("trigger_when"))
+        triggers = extract_triggers(rule, atom_scope, entities, meta.get("trigger_when"))
         severity = normalize_severity(meta.get("severity"), kind=atom_kind)
+        atom_date = atom.ts[:10] if len(atom.ts) >= 10 else ""
 
         # Consolidate: merge near-duplicate lessons/thoughts in same scope (unless explicitly superseding)
         merged_target: CompiledNode | None = None
-        if atom_kind in ("lesson", "thought") and not meta.get("supersedes") and not meta.get("node_id"):
+        if atom_kind in ("lesson", "thought", "principle") and not meta.get("supersedes") and not meta.get("node_id"):
             cand_terms = extract_terms(rule)
             for nid in node_order:
                 existing = nodes_by_id[nid]
-                if existing.type == atom_kind and existing.scope == atom.scope and existing.status == "active":
+                if existing.type == atom_kind and existing.scope == atom_scope and existing.status == "active":
                     if _jaccard(cand_terms, extract_terms(existing.rule)) >= 0.72:
                         merged_target = existing
                         break
@@ -266,8 +280,13 @@ def _compile_dream_nodes(
         if merged_target is not None:
             merged_count += 1
             merged_target.seen_count += 1
+            if atom_date and atom_date not in merged_target.seen_dates:
+                merged_target.seen_dates.append(atom_date)
+                merged_target.seen_dates.sort()
             if atom.id not in merged_target.evidence_ids:
                 merged_target.evidence_ids.append(atom.id)
+            if guard_hint and not merged_target.guard_hint:
+                merged_target.guard_hint = guard_hint
             for t in triggers:
                 if t not in merged_target.trigger_when and len(merged_target.trigger_when) < 5:
                     merged_target.trigger_when.append(t)
@@ -301,13 +320,14 @@ def _compile_dream_nodes(
         node = CompiledNode(
             id=node_id,
             type=atom_kind,
-            scope=atom.scope or "global",
+            scope=atom_scope,
             status="active",
             severity=severity,
             valid_from=atom.ts,
             valid_until=None,
             superseded_by=None,
             seen_count=int(meta.get("seen_count", 1)),
+            seen_dates=[atom_date] if atom_date else [],
             confidence=float(
                 meta.get(
                     "confidence",
@@ -317,6 +337,7 @@ def _compile_dream_nodes(
             trigger_when=triggers,
             rule=rule,
             rationale=rationale,
+            guard_hint=guard_hint,
             entities=entities,
             contradicts=list(meta.get("contradicts") or []),
             evidence_ids=[atom.id],

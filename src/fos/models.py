@@ -96,10 +96,12 @@ class CompiledNode:
     valid_until: str | None = None
     superseded_by: str | None = None
     seen_count: int = 1
+    seen_dates: list[str] = field(default_factory=list)
     confidence: float = 0.8
     trigger_when: list[str] = field(default_factory=list)
     rule: str = ""
     rationale: str = ""
+    guard_hint: str = ""
     entities: list[str] = field(default_factory=list)
     contradicts: list[str] = field(default_factory=list)
     evidence_ids: list[str] = field(default_factory=list)
@@ -118,10 +120,12 @@ class CompiledNode:
             "valid_until": self.valid_until,
             "superseded_by": self.superseded_by,
             "seen_count": self.seen_count,
+            "seen_dates": list(self.seen_dates),
             "confidence": round(float(self.confidence), 3),
             "trigger_when": list(self.trigger_when),
             "rule": self.rule,
             "rationale": self.rationale,
+            "guard_hint": self.guard_hint,
             "entities": list(self.entities),
             "contradicts": list(self.contradicts),
             "evidence_ids": list(self.evidence_ids),
@@ -146,10 +150,12 @@ class CompiledNode:
             valid_until=data.get("valid_until"),
             superseded_by=data.get("superseded_by"),
             seen_count=int(data.get("seen_count", 1)),
+            seen_dates=list(data.get("seen_dates") or []),
             confidence=float(data.get("confidence", 0.8)),
             trigger_when=list(data.get("trigger_when") or []),
             rule=str(data.get("rule", "")),
             rationale=str(data.get("rationale", "")),
+            guard_hint=str(data.get("guard_hint", "")),
             entities=list(data.get("entities") or []),
             contradicts=list(data.get("contradicts") or []),
             evidence_ids=list(data.get("evidence_ids") or []),
