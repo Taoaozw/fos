@@ -366,19 +366,28 @@ def query_snapshot_recall(
             break
         node = valid_map[nid]
         raw_card = node.to_l1_dict()
-        # Strip empty/null noise fields to maximize useful context per token budget
+        # Strip pure-indexing / L2-only metadata and empty fields so L1 recall stays ultra-lean
+        _omit_in_recall = (
+            "source_hash",
+            "verified_at",
+            "trigger_when",
+            "entities",
+            "seen_dates",
+            "evidence_ids",
+            "confidence",
+            "valid_from",
+            "status",
+        )
         card: dict[str, Any] = {
             k: v
             for k, v in raw_card.items()
-            if k not in ("source_hash", "verified_at")
+            if k not in _omit_in_recall
             and v is not None
             and v != ""
             and v != []
         }
         if fresh != "untracked":
             card["freshness"] = fresh
-        if node.source_ref:
-            card["l2_hint"] = f"source: {node.source_ref}"
         card["score"] = round(score, 4)
         card["channels"] = channels.get(nid, [])
         cost = estimate_json_tokens(card)
@@ -480,8 +489,8 @@ def query_snapshot_mirror(
             prior_decisions.append(
                 {
                     "id": nid,
-                    "status": card["status"],
-                    "valid_from": card["valid_from"],
+                    "status": card.get("status", "active"),
+                    "valid_from": card.get("valid_from", ""),
                     "rule": rule_text,
                     "rationale": card.get("rationale", ""),
                 }

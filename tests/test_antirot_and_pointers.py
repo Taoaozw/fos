@@ -43,7 +43,11 @@ def test_source_ref_drift_detection_recall_penalty_and_proposal(tmp_path: Path) 
     rec_fresh = engine.recall("网关热路径 零数据库", scope="demo-proj")
     assert rec_fresh["results"][0]["id"] == node_id
     assert rec_fresh["results"][0]["freshness"] == "fresh"
-    assert rec_fresh["results"][0]["l2_hint"].startswith("source: ")
+    assert rec_fresh["results"][0]["source_ref"] == meta["source_ref"]
+    # Compact L1 recall strips pure-indexing bloat (entities/trigger_when/evidence_ids)
+    assert "entities" not in rec_fresh["results"][0]
+    assert "trigger_when" not in rec_fresh["results"][0]
+    assert "evidence_ids" not in rec_fresh["results"][0]
     fresh_score = rec_fresh["results"][0]["score"]
 
     # 2. Modify authoritative file -> deterministically detected as `drifted` + recall penalty

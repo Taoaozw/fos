@@ -462,12 +462,16 @@ class SnapshotDB:
             next_frontier: list[str] = []
             for nid in frontier:
                 for edge in self.get_edges(nid, as_of=as_of):
+                    # Never expand through repo scope membership hubs (`scope:<repo>`);
+                    # otherwise every unrelated card in the same repo gets a spurious 2-hop boost.
+                    if edge.edge_type == "APPLIES_TO":
+                        continue
                     if edge.edge_type == "SUPERSEDES":
                         # Only traverse forward to superseding active node, never back to obsolete node
                         neighbor = edge.src_id if edge.dst_id == nid else None
                     else:
                         neighbor = edge.dst_id if edge.src_id == nid else edge.src_id
-                    if neighbor and neighbor not in visited:
+                    if neighbor and not neighbor.startswith("scope:") and neighbor not in visited:
                         visited[neighbor] = depth
                         next_frontier.append(neighbor)
             frontier = next_frontier

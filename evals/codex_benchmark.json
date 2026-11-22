@@ -1,0 +1,182 @@
+{
+  "version": "1.0",
+  "description": "End-to-end A/B evaluation suite testing real `codex exec` with vs. without FlowOS cognitive memory (v0007+).",
+  "cases": [
+    {
+      "id": "C01_cli_over_mcp",
+      "category": "global_redline",
+      "mode": "ab_memory",
+      "scope": null,
+      "recall_query": "本地 Agent 工具交付方式 CLI Skill MCP",
+      "prompt": "我要给公司内部写一个给本地 Claude Code / Codex 用的工单查询工具，你建议怎么交付给 Agent？用 MCP Server 吗？请直接给出明确结论和理由（2-3句话）。",
+      "must_match_all": [
+        "(?:禁止|不要|不用|不建议|拒绝|避免).{0,25}MCP|MCP.{0,25}(?:禁止|不要|不用|不建议|拒绝|避免)",
+        "CLI",
+        "Skill"
+      ],
+      "must_not_match": [
+        "(?:推荐|建议|优先|适合)(?:使用|采用|接入|搭建)[^。\\n]{0,12}MCP"
+      ]
+    },
+    {
+      "id": "C02_six_month_half_life",
+      "category": "global_redline",
+      "mode": "ab_memory",
+      "scope": null,
+      "recall_query": "长期记忆写入标准 六个月半衰期 一次性故障",
+      "prompt": "刚才线上账号 #8842 返回了一次 HTTP 400 临时报错，已经重试恢复了，也没有复现出代码或设计根因。要不要把这次事件写进长期记忆库？请直接回答要或不要，并说明判断标准。",
+      "must_match_all": [
+        "(?:不要|不应该|不应|不写入|不建议写入|无需写入|拒绝|丢弃)",
+        "(?:六个月|6\\s*个月|半衰期|结构性原因|可执行规则|可复用)"
+      ],
+      "must_not_match": [
+        "^(?:应该|建议|需要|可以)写入"
+      ]
+    },
+    {
+      "id": "C03_minimal_orthogonal_design",
+      "category": "global_redline",
+      "mode": "ab_memory",
+      "scope": null,
+      "recall_query": "最小局部改动 统一抽象 正交原语 错误状态 组合优先",
+      "prompt": "我要在现有项目里重构一个核心模块，按我的工程与代码设计偏好，我在改动范围、抽象粒度、状态与错误处理上应该遵守哪些核心原则？请简洁列出。",
+      "must_match_all": [
+        "(?:最小|局部改动|原地编辑|复用)",
+        "(?:正交|原语|统一抽象|组合)",
+        "(?:状态转换|可枚举|显式|副作用)"
+      ],
+      "must_not_match": []
+    },
+    {
+      "id": "C04_flowxy_gateway_db_and_fk",
+      "category": "repo_architecture",
+      "mode": "ab_memory",
+      "scope": "flowxy-gateway",
+      "recall_query": "gateway 连接业务库 外键 配置快照 Redpanda",
+      "prompt": "在 `flowxy-gateway` 项目里，我想让 `services/gateway` 直接连 PostgreSQL 查最新渠道配置，并在业务表里顺手加上数据库外键约束。这两个方案可行吗？如果不可以，正确做法是什么？",
+      "must_match_all": [
+        "(?:禁止|不可|不能|不行|不允许|反对)",
+        "(?:Redpanda|compacted\\s*topic|配置快照|内存)",
+        "(?:外键).{0,20}(?:禁止|不可|不能|禁用|不行)|(?:禁止|不可|不能|禁用).{0,20}(?:外键)"
+      ],
+      "must_not_match": []
+    },
+    {
+      "id": "C05_flowxy_spring_security",
+      "category": "repo_architecture",
+      "mode": "ab_memory",
+      "scope": "flowxy-gateway",
+      "recall_query": "console 认证 Spring Security WebFilter 禁止",
+      "prompt": "给 `flowxy-gateway` 的 `services/console` 做登录认证，我打算直接引入 Spring Security 来省事，可以吗？如果不行该用什么替代？",
+      "must_match_all": [
+        "(?:禁止|不可|不能|不行|不允许|不要).{0,25}Spring\\s*Security|Spring\\s*Security.{0,25}(?:禁止|不可|不能|不行|禁用)",
+        "(?:WebFilter|AuthWebFilter)"
+      ],
+      "must_not_match": [
+        "(?:可以|建议|推荐)(?:直接)?引入\\s*Spring\\s*Security"
+      ]
+    },
+    {
+      "id": "C06_ssh_center_ui_and_sqlite",
+      "category": "repo_architecture",
+      "mode": "ab_memory",
+      "scope": "ssh-center",
+      "recall_query": "ssh-center 前端 shadcn 原生 HTML Go SQLite CGO",
+      "prompt": "在 `ssh-center` 里新增一个配置表单页，我打算直接写原生 `<button>` 和 `<input>`；后端顺手换成需要 CGO 的 `go-sqlite3` 驱动。这两个改动符合项目规范吗？应该怎么做？",
+      "must_match_all": [
+        "shadcn",
+        "(?:禁止|不要|不得|不可|不能).{0,25}(?:原生|HTML)|(?:原生).{0,25}(?:禁止|不要|不得|不可|不能)",
+        "modernc\\.org/sqlite",
+        "(?:无\\s*CGO|不(?:需要|使用|引入)\\s*CGO|纯\\s*Go)"
+      ],
+      "must_not_match": []
+    },
+    {
+      "id": "C07_goto_decimal_and_channel",
+      "category": "repo_architecture",
+      "mode": "ab_memory",
+      "scope": "goto",
+      "recall_query": "上游配额 小数精度 仅上传远端 本地渠道 供应商 金额",
+      "prompt": "在 `goto` 项目里有两个改动想确认：1) 上游配额接口返回 `12.5`，我在适配器里直接转 `int` 截断存库；2) 仅上传到远端时，直接删掉本地渠道记录省得维护，并把金额字段返给供应商页面展示。这两点可以吗？",
+      "must_match_all": [
+        "(?:小数|精度)",
+        "(?:不可以|不行|禁止|不要|不可|不能|原样存储|保留小数)",
+        "(?:禁用|保留).{0,20}(?:本地渠道|渠道记录)|(?:本地渠道|渠道记录).{0,20}(?:禁用|保留)",
+        "(?:禁止|不得|不能|不要|排除|不含|不展示|隐藏).{0,25}(?:供应商|展示|金额)|金额.{0,25}(?:禁止|不得|不能|不要|排除|不含)"
+      ],
+      "must_not_match": []
+    },
+    {
+      "id": "C08_invoice_creator_release",
+      "category": "repo_architecture",
+      "mode": "ab_memory",
+      "scope": "invoice-creator",
+      "recall_query": "mygo-cli scripts/mygo.mjs release.sh R2 clive-flowxy",
+      "prompt": "在 `invoice-creator` 里发一个自动更新版本：我直接调用 `mygo-cli` npm 启动器执行 `mygo build -upload`，把更新托管到 `clive-flowxy` 并清理掉桶里旧版本的产物省空间。这样做对吗？正确流程是什么？",
+      "must_match_all": [
+        "(?:scripts/mygo\\.mjs|bun\\s+run)",
+        "(?:release\\.sh|R2)",
+        "(?:保留.{0,6}旧|禁止删除|不要删除|不得删除)"
+      ],
+      "must_not_match": []
+    },
+    {
+      "id": "C09_pointer_progressive_disclosure",
+      "category": "pointer_disclosure",
+      "mode": "ab_memory",
+      "scope": "flowxy-gateway",
+      "recall_query": "gateway 热路径 流式响应 DataBuffer ByteBuffer",
+      "prompt": "在 `flowxy-gateway` 改动 gateway 热路径的流式响应转发逻辑时，有哪些核心内存/转发约束？如果我要看完整细则，应该直接去读哪个源文件？请给出具体文件路径。",
+      "must_match_all": [
+        "DataBuffer",
+        "ByteBuffer",
+        "backend-conventions\\.md"
+      ],
+      "must_not_match": []
+    },
+    {
+      "id": "C10_scope_isolation",
+      "category": "scope_isolation",
+      "mode": "ab_memory",
+      "scope": "my-new-tool",
+      "recall_query": "my-new-tool SQLite 表 渠道权重 Redpanda topic",
+      "prompt": "我在一个全新的独立 Python 工具仓库 `my-new-tool` 里写本地 SQLite 工具。请问我需要强制遵守 `goto` 的渠道权重 `[-2147483648, 2147483647]` 约束，或者 `flowxy-gateway` 的 `flowxy.` Redpanda topic 命名规范吗？请直接回答需要或不需要，并说明作用域边界原因。",
+      "must_match_all": [
+        "(?:不需要|无需|不必|不适用|不用)",
+        "(?:仓库|项目|局部|scope|作用域|隔离)"
+      ],
+      "must_not_match": [
+        "^(?:需要|必须)强制遵守"
+      ]
+    },
+    {
+      "id": "C11_antirot_superseded_and_broken_ref",
+      "category": "antirot_freshness",
+      "mode": "sandbox_antirot",
+      "scope": "sandbox-web",
+      "recall_query": "sandbox-web 前端状态管理 数据缓存 库选型",
+      "prompt": "在 `sandbox-web` 前端项目里，现在服务端状态缓存应该用 Redux Toolkit 还是 TanStack Query？另外还需要按旧规范引入 Moment.js 做日期格式化吗？请给出明确判断。",
+      "must_match_all": [
+        "TanStack\\s*Query",
+        "(?:不(?:用|再|要|应|推荐)|替代|废弃|过期|弃用).{0,25}Redux|Redux.{0,25}(?:替代|废弃|过期|弃用|不(?:用|再|要))",
+        "(?:不(?:需要|要|建议|再|应)|失效|断链|删除|过期|弃用).{0,25}Moment|Moment.{0,25}(?:失效|断链|删除|过期|弃用|不(?:需要|要|建议))"
+      ],
+      "must_not_match": [
+        "(?:推荐|应该|继续)(?:使用|采用)\\s*Redux"
+      ]
+    },
+    {
+      "id": "C12_autonomous_codex_fos_cli",
+      "category": "autonomous_cli_tool",
+      "mode": "autonomous_cli",
+      "scope": "fos",
+      "recall_query": "fos 评测门禁 金标召回 合并重复节点 evidence_ids",
+      "prompt": "请先使用终端执行 `fos recall \"评测 金标 回归 证据\" --scope fos --json` 查询 `fos` 记忆库中关于 `fos` 项目评测门禁的教训，然后基于查询结果告诉我：1) 评测用例应通过什么字段解析证据？2) 基线与候选版本对比回归差异时应使用哪些金标用例？",
+      "must_match_all": [
+        "evidence_ids",
+        "(?:共同覆盖|交集)"
+      ],
+      "must_not_match": []
+    }
+  ]
+}
