@@ -12,7 +12,7 @@ from fos.redact import redact_secrets
 from fos.ulid import new_atom_id, new_ulid
 
 _CONSTRAINT_RE = re.compile(
-    r"(?:禁止|不要|必须|严禁|不能|不支持|never|must|do not|don't|avoid|--[a-z0-9-]+|\b\d+(?:\.\d+)?(?:ms|s|gb|mb|kb|%|x)\b)",
+    r"(?:--[a-z][a-z0-9-]*|\b\d+(?:\.\d+)?(?:ms|s|gb|mb|kb|%|x)\b)",
     re.IGNORECASE,
 )
 

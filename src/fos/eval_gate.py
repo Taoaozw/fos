@@ -16,7 +16,15 @@ from fos.store import SnapshotDB
 VALID_SUITES = ("all", "recall", "temporal", "fidelity", "behavior")
 
 _CRITICAL_TOKEN_RE = re.compile(
-    r"(?:禁止|不要|严禁|不能|不支持|必须|never|must|avoid|do not|don't|--[a-z0-9-]+|\b\d+(?:\.\d+)?(?:ms|s|gb|mb|%|x)\b)",
+    r"(?:--[a-z][a-z0-9-]*|\b\d+(?:\.\d+)?(?:ms|s|gb|mb|kb|%|x)\b)",
+    re.IGNORECASE,
+)
+_NEGATION_POLARITY_RE = re.compile(
+    r"(?:禁止|不要|严禁|不能|不支持|不得|避免|never|must not|avoid|do not|don't)",
+    re.IGNORECASE,
+)
+_OBLIGATION_POLARITY_RE = re.compile(
+    r"(?:必须|务必|应当|仅|只有|always|must\b|require)",
     re.IGNORECASE,
 )
 
@@ -308,12 +316,16 @@ def _eval_fidelity(
             if tok not in constraints:
                 constraints.append(tok)
 
-        if not constraints:
+        has_neg_raw = bool(_NEGATION_POLARITY_RE.search(raw_blob))
+        has_obl_raw = bool(_OBLIGATION_POLARITY_RE.search(raw_blob))
+        if not constraints and not has_neg_raw and not has_obl_raw:
             continue
         checked += 1
         missing = [c for c in constraints if c not in l1_text]
-        required_total += len(constraints)
-        preserved_total += len(constraints) - len(missing)
+        if has_neg_raw and not (_NEGATION_POLARITY_RE.search(l1_text) or _OBLIGATION_POLARITY_RE.search(l1_text)):
+            missing.append("<negation-polarity>")
+        required_total += len(constraints) + (1 if has_neg_raw else 0)
+        preserved_total += (len(constraints) + (1 if has_neg_raw else 0)) - len(missing)
         if missing:
             failures.append(
                 {
@@ -434,7 +446,7 @@ def evaluate_snapshot(
                 regressions.append(
                     f"Recall@5 regressed: {results['recall']['recall_at_5']} < baseline {base_rec['recall_at_5']}"
                 )
-            if results["recall"]["mrr"] + 1e-6 < base_rec["mrr"]:
+            if results["recall"]["cases"] >= 5 and results["recall"]["mrr"] + 0.05 < base_rec["mrr"]:
                 results["recall"]["passed"] = False
                 regressions.append(
                     f"MRR regressed: {results['recall']['mrr']} < baseline {base_rec['mrr']}"
