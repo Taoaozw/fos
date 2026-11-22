@@ -390,9 +390,9 @@ class MLXReasoner:
 
 
 class CLISubprocessReasoner:
-    """Non-interactive CLI provider adapter (`agy -p` / `claude -p` / `codex exec`)."""
+    """Non-interactive CLI provider adapter (`codex exec` / `claude -p` / `agy -p`)."""
 
-    def __init__(self, command: str = "claude -p", timeout_s: int = 60) -> None:
+    def __init__(self, command: str = "codex exec", timeout_s: int = 90) -> None:
         self._command = command
         self._timeout_s = timeout_s
 
@@ -401,9 +401,45 @@ class CLISubprocessReasoner:
         return f"cli:{self._command}"
 
     def complete_json(self, prompt: str, *, system: str = "") -> dict[str, Any] | None:
-        full_prompt = f"{system}\n\n{prompt}\n\nReturn strict JSON only." if system else f"{prompt}\n\nReturn strict JSON only."
-        argv = shlex.split(self._command) + [full_prompt]
+        import tempfile
+        from pathlib import Path
+
+        full_prompt = (
+            f"{system}\n\n{prompt}\n\nReturn strict valid JSON only (no markdown fences, no commentary)."
+            if system
+            else f"{prompt}\n\nReturn strict valid JSON only (no markdown fences, no commentary)."
+        )
+        tokens = shlex.split(self._command)
+        is_codex = len(tokens) >= 2 and Path(tokens[0]).name == "codex" and tokens[1] == "exec"
+
         try:
+            if is_codex:
+                with tempfile.TemporaryDirectory(prefix="fos-reasoner-") as tmp_dir:
+                    out_file = Path(tmp_dir) / "last.txt"
+                    argv = tokens + [
+                        "-s",
+                        "read-only",
+                        "-C",
+                        tmp_dir,
+                        "--skip-git-repo-check",
+                        "--ephemeral",
+                        "-o",
+                        str(out_file),
+                        full_prompt,
+                    ]
+                    proc = subprocess.run(
+                        argv,
+                        capture_output=True,
+                        text=True,
+                        timeout=self._timeout_s,
+                        check=False,
+                    )
+                    if proc.returncode != 0:
+                        return None
+                    raw_out = out_file.read_text(encoding="utf-8") if out_file.exists() else proc.stdout
+                    return _extract_json_object(raw_out)
+
+            argv = tokens + [full_prompt]
             proc = subprocess.run(
                 argv,
                 capture_output=True,

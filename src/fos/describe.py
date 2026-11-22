@@ -123,6 +123,8 @@ COMMAND_SPECS: list[dict[str, Any]] = [
         "flags": [
             {"name": "--dry-run", "type": "bool", "default": "false", "desc": "evaluate candidate without promoting"},
             {"name": "--no-gate", "type": "bool", "default": "false", "desc": "skip regression gates"},
+            {"name": "--reasoner", "type": "string", "desc": "distiller backend: auto|heuristic|cli|mlx|openai"},
+            {"name": "--cli-cmd", "type": "string", "desc": "override CLI reasoner command (e.g. 'codex exec')"},
             {"name": "--export-songe", "type": "string", "desc": "export cleaned experience JSONL for Songe MLX"},
             {"name": "--json", "type": "bool", "default": "false", "desc": "JSON output"},
         ],

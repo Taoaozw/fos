@@ -1,9 +1,16 @@
-"""Passive Hindsight collectors for Antigravity, Claude Code, Codex, Pi, and fops traces."""
+"""Passive Episode-level Hindsight collectors for Antigravity, Claude Code, Codex, Pi, and fops traces.
+
+Follows SOTA sleep-time memory practices (Hindsight / Songe / Claude Auto Dream):
+- Filters transient tool glitches upfront (edit uniqueness mismatches, bare Exit code 1, interrupted calls).
+- Captures full (Context + Problem -> Resolution) episodes by looking forward 1-5 turns for root cause & fix.
+- Deduplicates within debugging bursts and tracks incremental per-file line cursors.
+"""
 
 from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -23,7 +30,7 @@ _CORRECTION_RE = re.compile(
 )
 _ERROR_RE = re.compile(
     r"(?:traceback \(most recent|exception:|exit code [1-9]|exited with code [1-9]|fatal:|"
-    r"unrecognized option|unknown option|permission denied|econnrefused|command failed|报错|失败中断)",
+    r"unrecognized option|unknown option|permission denied|command failed|报错|失败中断|400|403|404|500|502|503)",
     re.IGNORECASE,
 )
 _DECISION_RE = re.compile(
@@ -32,7 +39,7 @@ _DECISION_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Wrapper / injected boilerplate stripping so system instructions never pollute hindsight
+# Wrapper / injected boilerplate stripping
 _USER_REQUEST_RE = re.compile(r"<USER_REQUEST>\s*([\s\S]*?)\s*</USER_REQUEST>", re.IGNORECASE)
 _BOILERPLATE_BLOCK_RE = re.compile(
     r"<(?:system-reminder|environment_context|permissions instructions|ADDITIONAL_METADATA|SYSTEM_MESSAGE|"
@@ -52,6 +59,28 @@ _NOISE_SUBSTRINGS = (
     "the user doesn't want to proceed with this tool use",
     "the tool call was rejected by the user",
 )
+
+# Transient tool glitches that have zero cross-session reusable value
+_TRANSIENT_TOOL_PATTERNS = (
+    re.compile(r"oldtext must be unique|the text must be unique|found \d+ occurrences of", re.IGNORECASE),
+    re.compile(r"not a git repository", re.IGNORECASE),
+    re.compile(r"^ls: .*: no such file or directory", re.IGNORECASE),
+    re.compile(r"tool call was interrupted before a result was received", re.IGNORECASE),
+    re.compile(r"is temporarily unavailable \(timed out\)", re.IGNORECASE),
+    re.compile(r"^tool error:\s*exit code \d+\s*$", re.IGNORECASE),
+    re.compile(r"^tool error:\s*<tool_use_error>error: no such tool available:", re.IGNORECASE),
+)
+
+
+@dataclass
+class _Turn:
+    line_no: int
+    ts: str
+    role: str  # user | assistant | tool | action
+    text: str
+    scope: str
+    is_err: bool
+    session_id: str
 
 
 def parse_since_duration(since: str | None) -> datetime | None:
@@ -85,16 +114,31 @@ def _strip_boilerplate(text: str) -> str:
     for sub in _NOISE_SUBSTRINGS:
         if sub in low:
             return ""
-    # Skip pasted massive prompts / multi-KB code dumps that are not concise hindsight
     if len(cleaned) > 3000:
         return ""
     return cleaned
 
 
-def _classify_hindsight(text: str, *, is_error_event: bool = False) -> tuple[str, str] | None:
-    """Return (kind, severity) if text carries hindsight signal, else None (drops chatter)."""
+def _is_transient_tool_noise(text: str, *, role: str, is_err: bool) -> bool:
+    """Filter fleeting tool/environment glitches so they never pollute long-term memory."""
+    compact = " ".join(text.strip().split())
+    if not compact:
+        return True
+    for pat in _TRANSIENT_TOOL_PATTERNS:
+        if pat.search(compact):
+            return True
+    # Bare shell exit codes with no informative message
+    if is_err and role in ("tool", "action") and len(compact) < 28:
+        return True
+    return False
+
+
+def _classify_hindsight(text: str, *, role: str = "user", is_error_event: bool = False) -> tuple[str, str] | None:
+    """Return (kind, severity) if turn carries hindsight signal, else None."""
     clean = _strip_boilerplate(text)
     if len(clean) < 16:
+        return None
+    if _is_transient_tool_noise(clean, role=role, is_err=is_error_event):
         return None
     if is_error_event or _ERROR_RE.search(clean):
         return ("lesson", "P1")
@@ -154,6 +198,30 @@ def _save_cursors(cursor_path: Path, cursors: dict[str, int]) -> None:
     tmp.replace(cursor_path)
 
 
+def _find_resolution(turns: list[_Turn], idx: int) -> str:
+    """Look ahead 1..5 turns after a problem/correction to capture the root cause or verified fix."""
+    candidates: list[str] = []
+    for j in range(idx + 1, min(len(turns), idx + 6)):
+        t = turns[j]
+        if t.role == "assistant" and not t.is_err and len(t.text) >= 24:
+            candidates.append(t.text)
+            # Prefer a substantive explanation turn (diagnosis/fix) over short "Checking..." preambles
+            if len(t.text) >= 80 or any(
+                cue in t.text.lower()
+                for cue in ("原因", "因为", "根因", "修复", "解决", "改用", "root cause", "fixed", "resolved", "because")
+            ):
+                return t.text[:450]
+    return candidates[-1][:450] if candidates else ""
+
+
+def _find_prev_context(turns: list[_Turn], idx: int) -> str:
+    for j in range(idx - 1, max(-1, idx - 3), -1):
+        t = turns[j]
+        if t.role in ("user", "assistant") and len(t.text) >= 12:
+            return t.text[:220]
+    return ""
+
+
 def collect_hindsight_events(
     source: str,
     *,
@@ -162,7 +230,7 @@ def collect_hindsight_events(
     cursor_path: Path | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """Scan local AI/tool traces and extract hindsight-bearing events (secret-redacted)."""
+    """Scan local AI/tool traces and extract high-signal (Context + Problem -> Resolution) episodes."""
     if source == ALL_SOURCES_ALIAS:
         all_events: list[dict[str, Any]] = []
         per_src_limit = max(1, limit)
@@ -216,9 +284,9 @@ def collect_hindsight_events(
         key = str(fpath.resolve())
         start_line = cursors.get(key, 0)
         last_line = start_line
-        prev_context = ""
         session_scope = "global"
         session_id_hint = fpath.stem
+        turns: list[_Turn] = []
 
         try:
             with fpath.open("r", encoding="utf-8", errors="replace") as fh:
@@ -231,7 +299,6 @@ def collect_hindsight_events(
                     except json.JSONDecodeError:
                         continue
 
-                    # Track session-level cwd/id metadata even on skipped lines
                     if source == "codex" and obj.get("type") in ("session_meta", "turn_context"):
                         p = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
                         if p.get("cwd"):
@@ -260,41 +327,65 @@ def collect_hindsight_events(
                     clean_text = _strip_boilerplate(text)
                     if not clean_text:
                         continue
-
-                    if role in ("assistant", "action"):
-                        prev_context = clean_text[:200]
-                        if not is_err:
-                            continue
-
-                    verdict = _classify_hindsight(clean_text, is_error_event=is_err)
-                    if verdict is None:
-                        if role == "user":
-                            prev_context = clean_text[:200]
-                        continue
-
-                    kind, severity = verdict
-                    combined = f"Context: {prev_context}\nHindsight: {clean_text[:500]}" if prev_context else clean_text[:500]
-                    red = redact_secrets(combined)
-                    events.append(
-                        {
-                            "kind": kind,
-                            "scope": scope,
-                            "source": f"hindsight:{source}:{session_id}",
-                            "raw": red.text,
-                            "ts": ts,
-                            "meta": {
-                                "severity": severity,
-                                "collector": source,
-                                "session_id": session_id,
-                                "evidence_ref": f"{fpath.name}:L{line_no}",
-                                "redacted_types": list(red.redacted_types),
-                            },
-                        }
+                    turns.append(
+                        _Turn(
+                            line_no=line_no,
+                            ts=ts,
+                            role=role,
+                            text=clean_text,
+                            scope=scope,
+                            is_err=is_err,
+                            session_id=session_id,
+                        )
                     )
-                    if len(events) >= limit:
-                        break
         except OSError:
             continue
+
+        # Extract episodes with burst cooldown (skip overlapping signals within 3 turns)
+        last_emitted_idx = -10
+        for idx, turn in enumerate(turns):
+            if len(events) >= limit:
+                break
+            if idx - last_emitted_idx < 3:
+                continue
+            if turn.role == "assistant" and not turn.is_err:
+                continue
+
+            verdict = _classify_hindsight(turn.text, role=turn.role, is_error_event=turn.is_err)
+            if verdict is None:
+                continue
+
+            kind, severity = verdict
+            prev_ctx = _find_prev_context(turns, idx)
+            resolution = _find_resolution(turns, idx)
+
+            parts: list[str] = []
+            if prev_ctx:
+                parts.append(f"Context: {prev_ctx}")
+            parts.append(f"Hindsight: {turn.text[:450]}")
+            if resolution:
+                parts.append(f"Resolution: {resolution}")
+            combined = "\n".join(parts)
+
+            red = redact_secrets(combined)
+            events.append(
+                {
+                    "kind": kind,
+                    "scope": turn.scope,
+                    "source": f"hindsight:{source}:{turn.session_id}",
+                    "raw": red.text,
+                    "ts": turn.ts,
+                    "meta": {
+                        "severity": severity,
+                        "collector": source,
+                        "session_id": turn.session_id,
+                        "has_resolution": bool(resolution),
+                        "evidence_ref": f"{fpath.name}:L{turn.line_no}",
+                        "redacted_types": list(red.redacted_types),
+                    },
+                }
+            )
+            last_emitted_idx = idx
 
         cursors[key] = last_line
 
@@ -318,7 +409,6 @@ def _extract_record_by_source(
         content = str(obj.get("content") or "")
         session_id = fpath.parent.parent.parent.name
         if rtype == "USER_INPUT":
-            # Extract real user prompt inside <USER_REQUEST> if wrapped; skip pure <SYSTEM_MESSAGE>
             if "<USER_REQUEST>" in content:
                 m = _USER_REQUEST_RE.search(content)
                 content = m.group(1).strip() if m else ""

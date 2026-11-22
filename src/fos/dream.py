@@ -1,12 +1,14 @@
-"""Sleep compilation (Quick Dream): Clean -> Extract -> Consolidate -> Compile(vN+1) -> Regression Gate -> Atomic Switch."""
+"""Sleep compilation (Quick Dream): Clean -> Distill -> Extract -> Consolidate -> Compile(vN+1) -> Regression Gate -> Atomic Switch."""
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
 
+from fos.config import ProviderConfig
 from fos.engine import (
     BrainEngine,
     build_l0_line,
@@ -19,12 +21,14 @@ from fos.errors import GateFailedError
 from fos.eval_gate import evaluate_snapshot
 from fos.models import (
     KIND_PREFIX,
+    VALID_KINDS,
     CompiledNode,
     GraphEdge,
     LedgerAtom,
     normalize_severity,
     now_iso,
 )
+from fos.providers import Reasoner, build_providers
 from fos.store import SnapshotDB
 from fos.tokens import extract_terms
 
@@ -32,6 +36,27 @@ _NOISE_PATTERNS = (
     re.compile(r"^(?:ok|okay|thanks|thx|got it|sure|好的|收到|谢谢|嗯|行)[\s.!！。]*$", re.IGNORECASE),
 )
 _PROMOTE_SEEN_THRESHOLD = 3
+_DISTILL_BATCH_SIZE = 10
+
+_DISTILL_SYSTEM_PROMPT = """You are FlowOS's Sleep-Time Cognitive Distiller (inspired by Songe, Hindsight, and LESSONS.md).
+Your job is to separate reusable long-term engineering/business knowledge from one-off session noise.
+
+For each raw episode, decide:
+- keep = false if it is ANY of:
+  1. A transient tool glitch (edit match failure, interrupted call, temp timeout, missing local dev server).
+  2. A bare question/symptom with NO verified root cause, fix, or concrete rule.
+  3. A one-off operational request (e.g. "swap account A to B", "check this single ID") that does NOT generalize into a reusable rule or decision.
+- keep = true ONLY if it contains a reusable cross-session pitfall/rule, verified root-cause fix, workflow constraint, or architectural/business decision.
+
+When keep = true:
+- Write `rule` as ONE crisp, actionable, bold-ready directive (in the episode's primary language, usually concise Chinese with exact English technical terms).
+- Preserve EVERY exact CLI flag (e.g. --mkpath), error code (e.g. 400, 403, 404), negation (禁止/不要/必须/never/must), and unit metric verbatim!
+- Write `rationale` as the concrete root cause or why it matters.
+- Write `trigger_when` as 2-3 short phrases describing when an AI agent should recall this rule before acting.
+- Choose `kind` in ["lesson", "decision", "principle"] and `severity` in ["P0", "P1", "P2"] (P0 only for high-impact recurring/production redlines).
+
+Return STRICT JSON with schema:
+{"items": [{"id": "<atom_id>", "keep": true/false, "kind": "lesson|decision|principle", "severity": "P0|P1|P2", "rule": "...", "rationale": "...", "trigger_when": ["..."], "entities": ["..."], "drop_reason": "..."}]}"""
 
 
 def _is_low_signal_noise(atom: LedgerAtom) -> bool:
@@ -67,11 +92,112 @@ def _detect_contradiction(a: CompiledNode, b: CompiledNode) -> bool:
     return a_neg != b_neg
 
 
+def _load_distill_cache(cache_path: Path) -> dict[str, dict[str, Any]]:
+    if not cache_path.exists():
+        return {}
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_distill_cache(cache_path: Path, cache: dict[str, dict[str, Any]]) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cache_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, cache_path)
+
+
+def _distill_hindsight_batch(
+    atoms: list[LedgerAtom],
+    reasoner: Reasoner,
+    cache_path: Path,
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """Batch-distill raw `hindsight:*` atoms via LLM Reasoner with incremental disk caching."""
+    stats = {"distilled_kept": 0, "distilled_dropped": 0, "distill_cache_hits": 0}
+    if reasoner.model_name == "heuristic":
+        return {}, stats
+
+    cache = _load_distill_cache(cache_path)
+    results: dict[str, dict[str, Any]] = {}
+    pending: list[LedgerAtom] = []
+
+    for atom in atoms:
+        if atom.source == "manual":
+            continue
+        ckey = f"{atom.id}@{reasoner.model_name}"
+        if ckey in cache:
+            results[atom.id] = cache[ckey]
+            stats["distill_cache_hits"] += 1
+            if cache[ckey].get("keep", True):
+                stats["distilled_kept"] += 1
+            else:
+                stats["distilled_dropped"] += 1
+        else:
+            pending.append(atom)
+
+    cache_dirty = False
+    for start in range(0, len(pending), _DISTILL_BATCH_SIZE):
+        chunk = pending[start : start + _DISTILL_BATCH_SIZE]
+        payload = [
+            {
+                "id": a.id,
+                "scope": a.scope,
+                "kind": a.kind,
+                "source": a.source,
+                "raw": a.raw[:900],
+            }
+            for a in chunk
+        ]
+        prompt = (
+            "Evaluate and distill these captured agent session episodes into reusable long-term memory cards "
+            "(or set keep=false to drop transient/one-off noise):\n"
+            + json.dumps(payload, ensure_ascii=False)
+        )
+        resp = reasoner.complete_json(prompt, system=_DISTILL_SYSTEM_PROMPT)
+        items = resp.get("items") if isinstance(resp, dict) and isinstance(resp.get("items"), list) else []
+        by_id = {str(it.get("id")): it for it in items if isinstance(it, dict) and it.get("id")}
+
+        for atom in chunk:
+            verdict = by_id.get(atom.id)
+            if verdict is None:
+                continue
+            entry = {
+                "keep": bool(verdict.get("keep", False)),
+                "kind": str(verdict.get("kind") or atom.kind),
+                "severity": str(verdict.get("severity") or atom.meta.get("severity") or "P1"),
+                "rule": str(verdict.get("rule") or "").strip(),
+                "rationale": str(verdict.get("rationale") or "").strip(),
+                "trigger_when": [str(x).strip() for x in (verdict.get("trigger_when") or []) if str(x).strip()][:4],
+                "entities": [str(x).strip().lower() for x in (verdict.get("entities") or []) if str(x).strip()][:8],
+                "drop_reason": str(verdict.get("drop_reason") or "").strip(),
+            }
+            if entry["keep"] and not entry["rule"]:
+                entry["keep"] = False
+            ckey = f"{atom.id}@{reasoner.model_name}"
+            cache[ckey] = entry
+            results[atom.id] = entry
+            cache_dirty = True
+            if entry["keep"]:
+                stats["distilled_kept"] += 1
+            else:
+                stats["distilled_dropped"] += 1
+
+    if cache_dirty:
+        _save_distill_cache(cache_path, cache)
+    return results, stats
+
+
 def _compile_dream_nodes(
     engine: BrainEngine,
     atoms: list[LedgerAtom],
+    *,
+    reasoner: Reasoner | None = None,
 ) -> tuple[list[CompiledNode], list[GraphEdge], dict[str, Any]]:
-    """Run Clean -> Extract -> Consolidate over the immutable atom ledger."""
+    """Run Clean -> Distill -> Extract -> Consolidate over the immutable atom ledger."""
+    active_reasoner = reasoner or engine.providers.reasoner
+
     cleaned: list[LedgerAtom] = []
     dropped_noise = 0
     for atom in atoms:
@@ -80,7 +206,12 @@ def _compile_dream_nodes(
             continue
         cleaned.append(atom)
 
-    # Track deterministic sequence IDs matching initial compilation order so golden eval IDs stay stable
+    distilled_map, distill_stats = _distill_hindsight_batch(
+        cleaned,
+        active_reasoner,
+        engine.data_dir / "distill_cache.json",
+    )
+
     counters: dict[str, int] = {}
     nodes_by_id: dict[str, CompiledNode] = {}
     node_order: list[str] = []
@@ -90,40 +221,44 @@ def _compile_dream_nodes(
     conflicts_found = 0
 
     for atom in cleaned:
-        meta = atom.meta
-        prefix = KIND_PREFIX.get(atom.kind, "MEM")
-        rule, rationale = split_rule_and_rationale(atom.raw)
-        if meta.get("rule"):
-            rule = str(meta["rule"])
-        if meta.get("rationale"):
-            rationale = str(meta["rationale"])
+        meta = dict(atom.meta)
+        atom_kind = atom.kind
 
-        # Optional LLM extraction refinement when MLX / CLI / OpenAI reasoner is configured
-        if engine.providers.reasoner.model_name != "heuristic" and len(atom.raw) > 120:
-            refined = engine.providers.reasoner.complete_json(
-                f"Extract a concise rule (keeping ALL negations, flags, and numbers verbatim!), "
-                f"rationale, and up to 3 trigger_when phrases from this {atom.kind}:\n{atom.raw}\n"
-                f'Return JSON: {{"rule": "...", "rationale": "...", "trigger_when": [...]}}',
-                system="Never drop negations, CLI flags, numbers, or boundary exceptions.",
-            )
-            if refined and isinstance(refined.get("rule"), str) and refined["rule"].strip():
-                rule = refined["rule"].strip()
-                if isinstance(refined.get("rationale"), str):
-                    rationale = refined["rationale"].strip()
-                if isinstance(refined.get("trigger_when"), list):
-                    meta = {**meta, "trigger_when": [str(x) for x in refined["trigger_when"] if x]}
+        # Apply LLM sleep distillation verdict if available for automated hindsight atoms
+        dist = distilled_map.get(atom.id)
+        if dist is not None:
+            if not dist.get("keep", False):
+                dropped_noise += 1
+                continue
+            if dist.get("kind") in VALID_KINDS:
+                atom_kind = dist["kind"]
+            rule = dist["rule"]
+            rationale = dist.get("rationale", "")
+            if dist.get("trigger_when"):
+                meta["trigger_when"] = dist["trigger_when"]
+            if dist.get("entities"):
+                meta["entities"] = dist["entities"]
+            if dist.get("severity"):
+                meta["severity"] = dist["severity"]
+        else:
+            rule, rationale = split_rule_and_rationale(atom.raw)
+            if meta.get("rule"):
+                rule = str(meta["rule"])
+            if meta.get("rationale"):
+                rationale = str(meta["rationale"])
 
-        entities = extract_entities(atom.raw, meta.get("entities"))
-        triggers = extract_triggers(atom.raw, atom.scope, entities, meta.get("trigger_when"))
-        severity = normalize_severity(meta.get("severity"), kind=atom.kind)
+        prefix = KIND_PREFIX.get(atom_kind, "MEM")
+        entities = extract_entities(f"{rule} {rationale}", meta.get("entities"))
+        triggers = extract_triggers(rule, atom.scope, entities, meta.get("trigger_when"))
+        severity = normalize_severity(meta.get("severity"), kind=atom_kind)
 
         # Consolidate: merge near-duplicate lessons/thoughts in same scope (unless explicitly superseding)
         merged_target: CompiledNode | None = None
-        if atom.kind in ("lesson", "thought") and not meta.get("supersedes") and not meta.get("node_id"):
+        if atom_kind in ("lesson", "thought") and not meta.get("supersedes") and not meta.get("node_id"):
             cand_terms = extract_terms(rule)
             for nid in node_order:
                 existing = nodes_by_id[nid]
-                if existing.type == atom.kind and existing.scope == atom.scope and existing.status == "active":
+                if existing.type == atom_kind and existing.scope == atom.scope and existing.status == "active":
                     if _jaccard(cand_terms, extract_terms(existing.rule)) >= 0.72:
                         merged_target = existing
                         break
@@ -140,8 +275,11 @@ def _compile_dream_nodes(
                 if e not in merged_target.entities and len(merged_target.entities) < 12:
                     merged_target.entities.append(e)
             merged_target.confidence = min(0.99, merged_target.confidence + 0.05)
-            # Elevate recurring lessons seen >= 3 times to P0
-            if merged_target.type == "lesson" and merged_target.seen_count >= _PROMOTE_SEEN_THRESHOLD and merged_target.severity != "P0":
+            if (
+                merged_target.type == "lesson"
+                and merged_target.seen_count >= _PROMOTE_SEEN_THRESHOLD
+                and merged_target.severity != "P0"
+            ):
                 merged_target.severity = "P0"
                 promoted_p0 += 1
             elif severity == "P0":
@@ -162,7 +300,7 @@ def _compile_dream_nodes(
 
         node = CompiledNode(
             id=node_id,
-            type=atom.kind,
+            type=atom_kind,
             scope=atom.scope or "global",
             status="active",
             severity=severity,
@@ -170,7 +308,12 @@ def _compile_dream_nodes(
             valid_until=None,
             superseded_by=None,
             seen_count=int(meta.get("seen_count", 1)),
-            confidence=float(meta.get("confidence", 0.85 if atom.source == "manual" else 0.75)),
+            confidence=float(
+                meta.get(
+                    "confidence",
+                    0.9 if dist is not None else (0.85 if atom.source == "manual" else 0.75),
+                )
+            ),
             trigger_when=triggers,
             rule=rule,
             rationale=rationale,
@@ -184,7 +327,6 @@ def _compile_dream_nodes(
         nodes_by_id[node_id] = node
         node_order.append(node_id)
 
-        # Handle supersession
         sup_id = meta.get("supersedes")
         if sup_id and str(sup_id) in nodes_by_id:
             old = nodes_by_id[str(sup_id)]
@@ -201,7 +343,6 @@ def _compile_dream_nodes(
                 )
             )
 
-        # Explicit links
         for rel_key, edge_type in (
             ("caused_by", "CAUSED_BY"),
             ("supports", "SUPPORTS"),
@@ -231,7 +372,6 @@ def _compile_dream_nodes(
                 )
             )
 
-    # Conflict detection pass among remaining active nodes
     active_nodes = [nodes_by_id[nid] for nid in node_order if nodes_by_id[nid].status == "active"]
     for i in range(len(active_nodes)):
         for j in range(i + 1, len(active_nodes)):
@@ -259,6 +399,8 @@ def _compile_dream_nodes(
         "promoted_to_p0": promoted_p0,
         "conflicts_detected": conflicts_found,
         "edges": len(edges),
+        "reasoner": active_reasoner.model_name,
+        **distill_stats,
     }
     return [nodes_by_id[nid] for nid in node_order], edges, stats
 
@@ -269,23 +411,33 @@ def run_dream(
     dry_run: bool = False,
     no_gate: bool = False,
     export_songe_path: Path | None = None,
+    reasoner_override: str | None = None,
+    cli_command: str | None = None,
 ) -> dict[str, Any]:
-    """Execute Quick Dream: Clean -> Extract -> Consolidate -> Compile(vN+1) -> Regression Gate -> Atomic Switch."""
+    """Execute Quick Dream: Clean -> Distill -> Extract -> Consolidate -> Compile(vN+1) -> Regression Gate -> Atomic Switch."""
     baseline_version = engine.snapshots.ensure_initialized()
     atoms = engine.ledger.load_all_atoms()
 
+    active_reasoner: Reasoner = engine.providers.reasoner
+    override_bundle = None
+    if reasoner_override and reasoner_override != "auto":
+        pcfg = ProviderConfig(reasoner=reasoner_override)
+        if cli_command:
+            pcfg.cli_command = cli_command
+        override_bundle = build_providers(pcfg)
+        active_reasoner = override_bundle.reasoner
+
     try:
-        nodes, edges, stats = _compile_dream_nodes(engine, atoms)
+        nodes, edges, stats = _compile_dream_nodes(engine, atoms, reasoner=active_reasoner)
         cand_version, cand_path = engine.snapshots.create_candidate()
 
-        # Batch-embed all compiled nodes
         texts = [node_embedding_text(n) for n in nodes]
         embeddings = engine.providers.embedder.embed(texts) if texts else []
 
         with SnapshotDB(cand_path, embedding_dim=engine.providers.embedder.dim) as cand_db:
             cand_db.set_meta("snapshot_version", cand_version)
             cand_db.set_meta("embedding_model", engine.providers.embedder.model_name)
-            cand_db.set_meta("reasoner_model", engine.providers.reasoner.model_name)
+            cand_db.set_meta("reasoner_model", active_reasoner.model_name)
             cand_db.set_meta("built_at", now_iso())
             cand_db.set_meta("atom_count", str(len(atoms)))
             for node, emb in zip(nodes, embeddings):
@@ -293,7 +445,6 @@ def run_dream(
             for edge in edges:
                 cand_db.add_edge(edge)
 
-        # Evaluate candidate v(N+1) against baseline vN
         gate_report: dict[str, Any] | None = None
         if not no_gate:
             with (
@@ -308,7 +459,6 @@ def run_dream(
                     baseline_db=base_ro,
                 )
 
-        # Optional Deep Dream hook: export high-value hindsight stream for Songe MLX
         songe_exported = 0
         if export_songe_path is not None:
             songe_exported = export_songe_stream(nodes, engine, export_songe_path)
@@ -353,7 +503,8 @@ def run_dream(
             "songe_exported": songe_exported,
         }
     finally:
-        # Release peak MLX unified memory immediately after Dream completes
+        if override_bundle is not None:
+            override_bundle.unload_heavy()
         engine.providers.unload_heavy()
 
 

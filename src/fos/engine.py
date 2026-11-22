@@ -71,10 +71,16 @@ def build_l0_line(node: CompiledNode) -> str:
 
 def split_rule_and_rationale(raw: str) -> tuple[str, str]:
     """Split a raw statement into a crisp rule/claim and rationale if separable."""
-    # For hindsight-collected pairs ("Context: ...\nHindsight: ..."), make Hindsight the rule and Context the rationale
+    # For hindsight-collected episodes ("Context: ...\nHindsight: ...\nResolution: ...")
     if "Hindsight:" in raw:
         before, after = raw.split("Hindsight:", 1)
         ctx = before.replace("Context:", "", 1).strip()
+        if "Resolution:" in after:
+            hind_part, res_part = after.split("Resolution:", 1)
+            hind = " ".join(line.strip() for line in hind_part.strip().splitlines() if line.strip())
+            res = " ".join(line.strip() for line in res_part.strip().splitlines() if line.strip())
+            if res and hind:
+                return truncate_to_tokens(f"{hind} -> {res}", 96), truncate_to_tokens(ctx, 50)
         hind = " ".join(line.strip() for line in after.strip().splitlines() if line.strip())
         if hind:
             return truncate_to_tokens(hind, 90), truncate_to_tokens(ctx, 60)

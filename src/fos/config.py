@@ -44,7 +44,7 @@ class ProviderConfig:
     rerank_model: str = "mlx-community/Qwen3-Reranker-0.6B-4bit"
     reasoner: str = "heuristic"  # heuristic | mlx | cli | openai
     reasoner_model: str = "mlx-community/Qwen2.5-14B-Instruct-4bit"
-    cli_command: str = "claude -p"  # or "agy -p" or "codex exec"
+    cli_command: str = "codex exec"  # or "claude -p" or "agy -p"
     openai_base_url: str = ""
     openai_api_key_env: str = "OPENAI_API_KEY"
 

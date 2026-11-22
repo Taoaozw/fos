@@ -125,3 +125,76 @@ def test_dream_regression_gate_blocks_bad_candidate(tmp_path: Path) -> None:
     assert exc_info.value.details["promoted"] is False
     assert exc_info.value.details["gate"]["gates"]["fidelity"]["passed"] is False
     assert exc_info.value.details["rejected_snapshot"] is not None
+
+
+def test_dream_llm_distillation_drops_noise_and_caches(tmp_path: Path) -> None:
+    from fos.providers import LexicalReranker, LocalHashEmbedder, ProviderBundle
+
+    class _MockDistiller:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        @property
+        def model_name(self) -> str:
+            return "mock:distiller-v1"
+
+        def complete_json(self, prompt: str, *, system: str = "") -> dict | None:
+            import json as _json
+
+            self.calls += 1
+            raw_json = prompt[prompt.index("[") :]
+            batch = _json.loads(raw_json)
+            items = []
+            for entry in batch:
+                if "MR token" in entry["raw"]:
+                    items.append(
+                        {
+                            "id": entry["id"],
+                            "keep": True,
+                            "kind": "lesson",
+                            "severity": "P0",
+                            "rule": "MR token 模式下必须先配置模型价格，再添加到渠道",
+                            "rationale": "未配置价格直接添加会导致渠道创建失败",
+                            "trigger_when": ["MR token 渠道配置", "添加新模型到渠道"],
+                            "entities": ["mr-token", "channel", "pricing"],
+                        }
+                    )
+                else:
+                    items.append({"id": entry["id"], "keep": False, "drop_reason": "one-off question without fix"})
+            return {"items": items}
+
+        def unload(self) -> None:
+            return
+
+    distiller = _MockDistiller()
+    providers = ProviderBundle(embedder=LocalHashEmbedder(), reranker=LexicalReranker(), reasoner=distiller)
+    engine = BrainEngine(tmp_path / "brain", providers=providers)
+
+    engine.add_atom(
+        kind="lesson",
+        scope="goto",
+        source="hindsight:codex:s1",
+        content="Hindsight: 创建失败：MR token 模式下模型必须先配置价格才能添加到渠道: gpt-6.1-terra",
+    )
+    engine.add_atom(
+        kind="lesson",
+        scope="goto",
+        source="hindsight:codex:s2",
+        content="Hindsight: 为什么一直返回 400.你看下具体的报错信息",
+    )
+
+    res1 = run_dream(engine)
+    assert res1["promoted"] is True
+    assert res1["stats"]["distilled_kept"] == 1
+    assert res1["stats"]["distilled_dropped"] == 1
+    assert res1["stats"]["compiled_nodes"] == 1
+    assert distiller.calls == 1
+
+    got = engine.get("LSN-001", tier="L1")
+    assert got["node"]["severity"] == "P0"
+    assert "必须先配置模型价格" in got["node"]["rule"]
+
+    # Second dream hits distill_cache.json with zero extra LLM calls
+    res2 = run_dream(engine)
+    assert res2["stats"]["distill_cache_hits"] == 2
+    assert distiller.calls == 1

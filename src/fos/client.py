@@ -427,10 +427,25 @@ class FosClient:
 
     # --- Brain maintenance operations ---
 
-    def dream(self, *, dry_run: bool = False, no_gate: bool = False, export_songe: Path | None = None) -> dict[str, Any]:
-        if self.is_remote and export_songe is None:
+    def dream(
+        self,
+        *,
+        dry_run: bool = False,
+        no_gate: bool = False,
+        export_songe: Path | None = None,
+        reasoner: str | None = None,
+        cli_command: str | None = None,
+    ) -> dict[str, Any]:
+        if self.is_remote and export_songe is None and not reasoner:
             return self._request("POST", "/v1/dream", json_body={"dry_run": dry_run, "no_gate": no_gate})
-        return run_dream(self._engine(), dry_run=dry_run, no_gate=no_gate, export_songe_path=export_songe)
+        return run_dream(
+            self._engine(),
+            dry_run=dry_run,
+            no_gate=no_gate,
+            export_songe_path=export_songe,
+            reasoner_override=reasoner,
+            cli_command=cli_command,
+        )
 
     def eval(self, *, suite: str = "all") -> dict[str, Any]:
         if self.is_remote:

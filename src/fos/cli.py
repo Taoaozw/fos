@@ -205,6 +205,8 @@ def build_parser() -> _StrictArgumentParser:
     p_dream = sub.add_parser("dream", aliases=["dr"], help="Run sleep compilation + 4-gate eval + atomic switch")
     p_dream.add_argument("--dry-run", action="store_true")
     p_dream.add_argument("--no-gate", action="store_true")
+    p_dream.add_argument("--reasoner", type=str, default=None, choices=["auto", "heuristic", "cli", "mlx", "openai"], help="Override dream distiller backend")
+    p_dream.add_argument("--cli-cmd", dest="cli_cmd", type=str, default=None, help="Override CLI reasoner command (e.g. 'codex exec' or 'claude -p')")
     p_dream.add_argument("--export-songe", type=str, default=None, help="Export cleaned experience stream for Songe MLX")
     p_dream.add_argument("--json", action="store_true")
 
@@ -378,7 +380,13 @@ def run_cli(argv: list[str] | None = None) -> int:
             result = client.export_views(Path(args.out))
         elif cmd == "dream":
             songe_path = Path(args.export_songe) if args.export_songe else None
-            result = client.dream(dry_run=args.dry_run, no_gate=args.no_gate, export_songe=songe_path)
+            result = client.dream(
+                dry_run=args.dry_run,
+                no_gate=args.no_gate,
+                export_songe=songe_path,
+                reasoner=args.reasoner,
+                cli_command=args.cli_cmd,
+            )
         elif cmd == "eval":
             if args.eval_args:
                 if len(args.eval_args) == 2 and args.eval_args[0] == "pin":
