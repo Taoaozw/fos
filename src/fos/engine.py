@@ -12,10 +12,15 @@ from fos.config import FosConfig, ProviderConfig
 from fos.errors import NotFoundError, UsageError
 from fos.freshness import (
     check_source_freshness,
+    evaluate_surprise,
     freshness_multiplier,
     load_usage_stats,
+    node_utility_score,
     record_recall_hits,
+    record_utility_feedback,
     resolve_legacy_source_ref,
+    summarize_utility_analytics,
+    utility_multiplier,
 )
 from fos.ledger import LedgerStore
 from fos.models import (
@@ -172,11 +177,12 @@ def query_snapshot_boot(
     prioritizes cross-project principles & P0 redlines over single-repo items.
     """
     raw_active = db.list_nodes(scope=project, as_of=None)
-    # Exclude low-priority P2 trivia and broken-ref deleted-doc cards from wakeup kernel
+    # Exclude low-priority P2 trivia, graduated mechanical guards, and broken-ref deleted-doc cards from wakeup kernel
     active = [
         n
         for n in raw_active
         if (n.severity != "P2" or n.type == "principle")
+        and not n.graduated
         and check_source_freshness(n.source_ref, n.source_hash) != "broken_ref"
     ]
     if project is None:
@@ -254,6 +260,7 @@ def query_snapshot_recall(
     budget: int = 1200,
     limit: int = 20,
     mode: str = "online",
+    usage_stats: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Execute 4-way hybrid recall + RRF + Rerank + strict L1 token budget packing."""
     if kind and kind not in VALID_KINDS:
@@ -345,8 +352,9 @@ def query_snapshot_recall(
         docs = [(nid, node_embedding_text(valid_map[nid])) for nid in top_ids]
         rerank_scores = reranker.rerank(query, docs)
 
-    # Way 4: Temporal, Salience & Anti-Rot Freshness Weighting
+    # Way 4: Temporal, Salience, Anti-Rot Freshness & PlugMem Utility Weighting
     ref_time = parse_timestamp(as_of) if as_of else datetime.now(timezone.utc)
+    u_stats = usage_stats or {}
     final_ranked: list[tuple[str, float, str]] = []
     max_rrf = max((rrf_scores[nid] for nid in top_ids), default=1.0) or 1.0
 
@@ -358,7 +366,8 @@ def query_snapshot_recall(
         # Scope boost for exact project match over 'global'
         scope_boost = 1.15 if (scope and node.scope == scope) else 1.0
         fresh = check_source_freshness(node.source_ref, node.source_hash)
-        combined = (0.55 * rr + 0.45 * norm_rrf) * salience * scope_boost * freshness_multiplier(fresh)
+        util_mult = utility_multiplier(u_stats.get(nid))
+        combined = (0.55 * rr + 0.45 * norm_rrf) * salience * scope_boost * freshness_multiplier(fresh) * util_mult
         final_ranked.append((nid, combined, fresh))
 
     final_ranked.sort(key=lambda x: x[1], reverse=True)
@@ -639,6 +648,44 @@ class BrainEngine:
                 db.upsert_node(target, embedding=emb)
             return None, target
 
+        # Pure lifecycle graduation transition (rule now mechanically enforced via fos guard / CI)
+        grad_target_id = meta.get("graduates")
+        if grad_target_id:
+            target = db.get_node(str(grad_target_id))
+            if target is not None:
+                target.graduated = True
+                if meta.get("guard_pattern"):
+                    target.guard_pattern = str(meta["guard_pattern"]).strip()
+                if meta.get("graduate_reason"):
+                    reason = str(meta["graduate_reason"]).strip()
+                    target.rationale = (
+                        f"{target.rationale} [graduated: {reason}]".strip()
+                        if target.rationale
+                        else f"[graduated: {reason}]"
+                    )
+                target.updated_at = atom.ts
+                emb = self.providers.embedder.embed([node_embedding_text(target)])[0]
+                db.upsert_node(target, embedding=emb)
+            return None, target
+
+        # Pure reinforcement transition (Titans low-surprise redundant automated sighting)
+        reinforce_target_id = meta.get("reinforces")
+        if reinforce_target_id:
+            target = db.get_node(str(reinforce_target_id))
+            if target is not None:
+                target.seen_count += 1
+                day = atom.ts[:10] if len(atom.ts) >= 10 else ""
+                if day and day not in target.seen_dates:
+                    target.seen_dates.append(day)
+                    target.seen_dates.sort()
+                if atom.id not in target.evidence_ids:
+                    target.evidence_ids.append(atom.id)
+                target.l0 = build_l0_line(target)
+                target.updated_at = atom.ts
+                emb = self.providers.embedder.embed([node_embedding_text(target)])[0]
+                db.upsert_node(target, embedding=emb)
+            return target, None
+
         prefix = KIND_PREFIX.get(atom.kind, "MEM")
         node_id = str(meta.get("node_id") or db.next_sequence_id(prefix))
         severity = normalize_severity(meta.get("severity"), kind=atom.kind)
@@ -674,6 +721,8 @@ class BrainEngine:
             rule=rule,
             rationale=rationale,
             guard_hint=str(meta.get("guard_hint") or ""),
+            guard_pattern=str(meta.get("guard_pattern") or ""),
+            graduated=bool(meta.get("graduated", False)),
             source_ref=source_ref,
             source_hash=source_hash,
             verified_at=verified_at,
@@ -750,6 +799,19 @@ class BrainEngine:
                     )
                 )
 
+        # Titans surprise conflict edge when new memory opposes an existing active rule
+        conflict_id = meta.get("surprise_conflict_with")
+        if conflict_id and str(conflict_id) != node.id and db.get_node(str(conflict_id)) is not None:
+            db.add_edge(
+                GraphEdge(
+                    src_id=node.id,
+                    dst_id=str(conflict_id),
+                    edge_type="CONTRADICTS",
+                    valid_from=atom.ts,
+                    meta={"atom_id": atom.id, "detector": "surprise_gate"},
+                )
+            )
+
         # Scope application edge
         if node.scope and node.scope != "global":
             db.add_edge(
@@ -784,14 +846,44 @@ class BrainEngine:
             raise UsageError("Content must be non-empty.")
 
         meta_clean = dict(meta or {})
+        scope_clean = scope or "global"
+        raw_clean = content.strip()
+        is_lifecycle_op = any(k in meta_clean for k in ("archives", "graduates", "supersedes", "reinforces"))
+
+        # Titans-style surprise & conflict gate against active same-scope/global memories
+        surprise_info: dict[str, Any] = {
+            "surprise": 1.0,
+            "classification": "novel",
+            "closest_node_id": None,
+            "similarity": 0.0,
+        }
+        if not is_lifecycle_op:
+            with self.snapshots.open_current(read_only=True) as db:
+                existing_active = db.list_nodes(scope=None if scope_clean == "global" else scope_clean, as_of=None)
+            same_bucket = [n for n in existing_active if n.scope == scope_clean and n.type == kind]
+            if same_bucket:
+                texts = [raw_clean] + [n.rule for n in same_bucket]
+                vecs = self.providers.embedder.embed(texts)
+                if len(vecs) == len(texts):
+                    surprise_info = evaluate_surprise(
+                        raw_clean,
+                        vecs[0],
+                        list(zip(same_bucket, vecs[1:])),
+                    )
+                    if surprise_info["classification"] == "redundant" and not source.startswith("manual") and surprise_info["closest_node_id"]:
+                        # Low-surprise automated duplicate: reinforce existing card instead of duplicating
+                        meta_clean["reinforces"] = surprise_info["closest_node_id"]
+                    elif surprise_info["classification"] == "conflict" and surprise_info["closest_node_id"]:
+                        meta_clean["surprise_conflict_with"] = surprise_info["closest_node_id"]
+
         atom = LedgerAtom(
             id=atom_id or new_atom_id(),
             ts=ts or now_iso(),
             device=device or self.device,
             kind=kind,
-            scope=scope or "global",
+            scope=scope_clean,
             source=source,
-            raw=content.strip(),
+            raw=raw_clean,
             meta=meta_clean,
         )
 
@@ -800,13 +892,16 @@ class BrainEngine:
 
         # Index immediately into current active snapshot
         with self.snapshots.open_current() as db:
-            # Verify supersedes/archives target exists if provided
+            # Verify supersedes/archives/graduates target exists if provided
             sup_id = persisted.meta.get("supersedes")
             if sup_id and db.get_node(str(sup_id)) is None:
                 raise NotFoundError(f"Supersedes target node not found: {sup_id}")
             arc_id = persisted.meta.get("archives")
             if arc_id and db.get_node(str(arc_id)) is None:
                 raise NotFoundError(f"Archive target node not found: {arc_id}")
+            grad_id = persisted.meta.get("graduates")
+            if grad_id and db.get_node(str(grad_id)) is None:
+                raise NotFoundError(f"Graduate target node not found: {grad_id}")
             node, superseded = self._compile_atom_into_db(db, persisted, synthesize_eval=True)
             db.set_meta("atom_count", str(len(self.ledger.load_all_atoms())))
             snap_ver = db.get_meta("snapshot_version", self.snapshots.current_version() or "v0001")
@@ -816,6 +911,9 @@ class BrainEngine:
             "node": node.to_dict() if node else None,
             "superseded": superseded.id if (superseded and sup_id) else None,
             "archived": superseded.id if (superseded and arc_id) else None,
+            "graduated": superseded.id if (superseded and grad_id) else None,
+            "reinforced": persisted.meta.get("reinforces"),
+            "surprise": surprise_info,
             "redacted": bool(persisted.meta.get("redacted_types")),
             "snapshot_version": snap_ver,
         }
@@ -846,7 +944,7 @@ class BrainEngine:
         }
         if reason.strip():
             meta["rationale"] = reason.strip()
-        return self.add_atom(
+        res = self.add_atom(
             kind=kind,
             content=new_content.strip(),
             scope=scope,
@@ -854,6 +952,57 @@ class BrainEngine:
             device=device,
             meta=meta,
         )
+        # Implicit PlugMem feedback: superseded node was outdated/inaccurate
+        record_utility_feedback(self.data_dir, node_id, "noise", context=f"Superseded by {(res.get('node') or {}).get('id', 'correction')}")
+        return res
+
+    def graduate_node(
+        self,
+        node_id: str,
+        *,
+        guard_pattern: str | None = None,
+        reason: str = "",
+        device: str | None = None,
+    ) -> dict[str, Any]:
+        """Graduate a rule to mechanical enforcement (keeps active in `fos guard`, frees L0 wakeup tokens)."""
+        with self.snapshots.open_current(read_only=True) as db:
+            old = db.get_node(node_id)
+            if old is None:
+                raise NotFoundError(f"Node not found: {node_id}")
+            kind = old.type
+            scope = old.scope
+            existing_pat = old.guard_pattern
+
+        final_pat = (guard_pattern if guard_pattern is not None else existing_pat).strip()
+        meta: dict[str, Any] = {
+            "graduates": node_id,
+            "graduate_reason": reason.strip() or "Graduated to deterministic static guard",
+        }
+        if final_pat:
+            meta["guard_pattern"] = final_pat
+        return self.add_atom(
+            kind=kind,
+            content=f"Graduate {node_id}: {meta['graduate_reason']}",
+            scope=scope,
+            source="manual:graduate",
+            device=device,
+            meta=meta,
+        )
+
+    def feedback_node(
+        self,
+        node_id: str,
+        verdict: str,
+        *,
+        context: str = "",
+    ) -> dict[str, Any]:
+        """Record PlugMem utility feedback (`useful` | `noise`) for a node."""
+        if verdict not in ("useful", "noise"):
+            raise UsageError(f"Invalid verdict '{verdict}'. Must be 'useful' or 'noise'.")
+        with self.snapshots.open_current(read_only=True) as db:
+            if db.get_node(node_id) is None:
+                raise NotFoundError(f"Node not found: {node_id}")
+        return record_utility_feedback(self.data_dir, node_id, verdict, context=context)
 
     def archive_node(
         self,
@@ -912,6 +1061,7 @@ class BrainEngine:
         budget: int = 1200,
         limit: int = 20,
     ) -> dict[str, Any]:
+        usage = load_usage_stats(self.data_dir)
         with self.snapshots.open_current(read_only=True) as db:
             res = query_snapshot_recall(
                 db,
@@ -924,6 +1074,7 @@ class BrainEngine:
                 budget=budget,
                 limit=limit,
                 mode="online",
+                usage_stats=usage,
             )
         if as_of is None and res.get("results"):
             record_recall_hits(self.data_dir, [str(r["id"]) for r in res["results"] if r.get("id")])
@@ -1010,6 +1161,8 @@ class BrainEngine:
         pointer_nodes = 0
         drifted_nodes = 0
         broken_ref_nodes = 0
+        guard_rules_count = 0
+        graduated_nodes = 0
 
         node_dicts: list[dict[str, Any]] = []
         for n in all_nodes:
@@ -1025,14 +1178,23 @@ class BrainEngine:
                     bloated_nodes += 1
                 if n.source_ref:
                     pointer_nodes += 1
+                if n.guard_pattern:
+                    guard_rules_count += 1
+                if n.graduated:
+                    graduated_nodes += 1
                 if fresh == "drifted":
                     drifted_nodes += 1
                 elif fresh == "broken_ref":
                     broken_ref_nodes += 1
+            ust = usage_stats.get(n.id) or {}
             d = n.to_dict()
             d["pinned"] = n.id in pinned_ids
             d["freshness"] = fresh
-            d["recall_hits"] = int((usage_stats.get(n.id) or {}).get("hits", 0))
+            d["recall_hits"] = int(ust.get("hits", 0))
+            d["useful_count"] = int(ust.get("useful", 0))
+            d["noise_count"] = int(ust.get("noise", 0))
+            d["guard_blocks"] = int(ust.get("guard_blocks", 0))
+            d["utility_score"] = node_utility_score(ust)
             node_dicts.append(d)
 
         # Rejected snapshots count for regression gate visibility
@@ -1046,6 +1208,7 @@ class BrainEngine:
         active_cnt = len(active_rule_tokens)
         avg_rule_tokens = round(sum(active_rule_tokens) / active_cnt, 1) if active_cnt else 0.0
         pointer_pct = round(100.0 * pointer_nodes / active_cnt, 1) if active_cnt else 0.0
+        utility_summary = summarize_utility_analytics(self.data_dir, all_nodes)
 
         recent_atoms = [a.to_dict() for a in reversed(atoms[-ledger_limit:])]
         return {
@@ -1053,6 +1216,7 @@ class BrainEngine:
             "history": self.snapshots.history(),
             "rejected_snapshots": rejected_snaps,
             "sqlite_vec": has_vec,
+            "embedder": getattr(self.providers.embedder, "model_name", "local_hash"),
             "meta": meta,
             "counts": {
                 "total_nodes": len(all_nodes),
@@ -1072,7 +1236,10 @@ class BrainEngine:
                 "pointer_coverage_pct": pointer_pct,
                 "drifted_nodes": drifted_nodes,
                 "broken_ref_nodes": broken_ref_nodes,
+                "guard_rules_count": guard_rules_count,
+                "graduated_nodes": graduated_nodes,
             },
+            "utility": utility_summary,
             "distributions": {
                 "by_status": by_status,
                 "by_type": by_type,

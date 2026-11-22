@@ -117,29 +117,29 @@ class MLXEmbedder:
 
     @property
     def dim(self) -> int:
-        if self._dim is not None:
-            return self._dim
-        sample = self.embed(["dimension probe"])
-        self._dim = len(sample[0]) if sample else self._fallback_dim
-        return self._dim
+        # Keep dim lazy so read-only commands like `fos boot` never load GPU weights at startup
+        return self._dim if self._dim is not None else self._fallback_dim
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        self._ensure_loaded()
-        from mlx_embeddings import generate  # type: ignore[import-not-found]
+        try:
+            self._ensure_loaded()
+            from mlx_embeddings import generate  # type: ignore[import-not-found]
 
-        output = generate(self._model, self._tokenizer, texts=texts)
-        embs = getattr(output, "text_embeds", output)
-        rows = embs.tolist() if hasattr(embs, "tolist") else [list(r) for r in embs]
-        normed: list[list[float]] = []
-        for row in rows:
-            vals = [float(x) for x in row]
-            n = math.sqrt(sum(v * v for v in vals))
-            normed.append([v / n for v in vals] if n > 0 else vals)
-        if normed:
-            self._dim = len(normed[0])
-        return normed
+            output = generate(self._model, self._tokenizer, texts=texts)
+            embs = getattr(output, "text_embeds", output)
+            rows = embs.tolist() if hasattr(embs, "tolist") else [list(r) for r in embs]
+            normed: list[list[float]] = []
+            for row in rows:
+                vals = [float(x) for x in row]
+                n = math.sqrt(sum(v * v for v in vals))
+                normed.append([v / n for v in vals] if n > 0 else vals)
+            if normed:
+                self._dim = len(normed[0])
+            return normed
+        except ImportError:
+            return LocalHashEmbedder(dim=self._fallback_dim).embed(texts)
 
     def unload(self) -> None:
         self._model = None

@@ -108,6 +108,18 @@ export const fosApi = {
     ),
   pinNode: (id: string) =>
     request<{ pinned_node: string }>("POST", `/v1/eval/pin/${encodeURIComponent(id)}`),
+  feedbackNode: (id: string, verdict: "useful" | "noise", context = "") =>
+    request<{ node_id: string; utility_score: number }>(
+      "POST",
+      `/v1/nodes/${encodeURIComponent(id)}/feedback`,
+      { verdict, context }
+    ),
+  graduateNode: (id: string, guardPattern?: string, reason = "") =>
+    request<{ graduated: string }>(
+      "POST",
+      `/v1/nodes/${encodeURIComponent(id)}/graduate`,
+      { guard_pattern: guardPattern || null, reason }
+    ),
   recall: (input: { q: string; scope?: string; asOf?: string; budget?: number }) => {
     const qs = new URLSearchParams({
       q: input.q,

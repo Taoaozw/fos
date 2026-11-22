@@ -140,6 +140,8 @@ class SnapshotDB:
                 rule TEXT NOT NULL,
                 rationale TEXT NOT NULL DEFAULT '',
                 guard_hint TEXT NOT NULL DEFAULT '',
+                guard_pattern TEXT NOT NULL DEFAULT '',
+                graduated INTEGER NOT NULL DEFAULT 0,
                 source_ref TEXT NOT NULL DEFAULT '',
                 source_hash TEXT NOT NULL DEFAULT '',
                 verified_at TEXT NOT NULL DEFAULT '',
@@ -200,6 +202,10 @@ class SnapshotDB:
             cur.execute("ALTER TABLE nodes ADD COLUMN seen_dates_json TEXT NOT NULL DEFAULT '[]'")
         if "guard_hint" not in existing_cols:
             cur.execute("ALTER TABLE nodes ADD COLUMN guard_hint TEXT NOT NULL DEFAULT ''")
+        if "guard_pattern" not in existing_cols:
+            cur.execute("ALTER TABLE nodes ADD COLUMN guard_pattern TEXT NOT NULL DEFAULT ''")
+        if "graduated" not in existing_cols:
+            cur.execute("ALTER TABLE nodes ADD COLUMN graduated INTEGER NOT NULL DEFAULT 0")
         if "source_ref" not in existing_cols:
             cur.execute("ALTER TABLE nodes ADD COLUMN source_ref TEXT NOT NULL DEFAULT ''")
         if "source_hash" not in existing_cols:
@@ -244,6 +250,8 @@ class SnapshotDB:
             rule=str(row["rule"]),
             rationale=str(row["rationale"]),
             guard_hint=str(row["guard_hint"]) if "guard_hint" in keys else "",
+            guard_pattern=str(row["guard_pattern"]) if "guard_pattern" in keys else "",
+            graduated=bool(row["graduated"]) if "graduated" in keys else False,
             source_ref=str(row["source_ref"]) if "source_ref" in keys else "",
             source_hash=str(row["source_hash"]) if "source_hash" in keys else "",
             verified_at=str(row["verified_at"]) if "verified_at" in keys else "",
@@ -280,10 +288,10 @@ class SnapshotDB:
             INSERT OR REPLACE INTO nodes (
                 id, type, scope, status, severity, valid_from, valid_until,
                 superseded_by, seen_count, seen_dates_json, confidence, l0, rule, rationale,
-                guard_hint, source_ref, source_hash, verified_at,
+                guard_hint, guard_pattern, graduated, source_ref, source_hash, verified_at,
                 trigger_when_json, entities_json, contradicts_json, evidence_ids_json,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 node.id,
@@ -301,6 +309,8 @@ class SnapshotDB:
                 node.rule,
                 node.rationale,
                 node.guard_hint,
+                node.guard_pattern,
+                1 if node.graduated else 0,
                 node.source_ref,
                 node.source_hash,
                 node.verified_at,

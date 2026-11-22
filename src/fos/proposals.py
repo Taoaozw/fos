@@ -26,7 +26,7 @@ from typing import Any, Literal
 
 from fos.engine import BrainEngine, build_l0_line, node_embedding_text
 from fos.errors import ExitCode, FosError, NotFoundError, UsageError
-from fos.freshness import check_source_freshness, load_usage_stats
+from fos.freshness import check_source_freshness, load_usage_stats, node_utility_score
 from fos.models import CompiledNode, VALID_KINDS, normalize_severity, now_iso, parse_timestamp
 from fos.providers import HeuristicReasoner, Reasoner
 from fos.tokens import estimate_tokens as count_tokens, tokenize_for_fts, truncate_to_tokens
@@ -630,9 +630,30 @@ def find_stale_candidates(
                 }
             )
             continue
+        ent = stats.get(n.id) or {}
+        hits = int(ent.get("hits", 0))
+        noise = int(ent.get("noise", 0))
+        util = node_utility_score(ent)
+        # PlugMem high-hit/low-utility noise or repeated negative feedback -> immediate review
+        if (hits >= 5 and util < 0.38) or (noise >= 2 and util < 0.40):
+            stale.append(
+                {
+                    "id": n.id,
+                    "scope": n.scope,
+                    "type": n.type,
+                    "severity": n.severity,
+                    "rot_reason": "low_utility",
+                    "source_ref": n.source_ref,
+                    "hits": hits,
+                    "noise": noise,
+                    "utility_score": util,
+                    "age_days": 0,
+                    "rule": n.rule[:220],
+                }
+            )
+            continue
         if n.severity == "P0" or n.type == "principle" or n.seen_count > 1:
             continue
-        hits = int((stats.get(n.id) or {}).get("hits", 0))
         if hits >= 2:
             continue
         dt = parse_timestamp(n.updated_at or n.valid_from)
@@ -813,6 +834,13 @@ def _heuristic_synthesize(
             title = f"源文件已变更，建议刷新或归档 {st['id']}"
             rationale = f"权威源文件 `{st.get('source_ref', '')}` 内容已漂移，建议重新采集或归档旧摘要。"
             conf = 0.84
+        elif rot_reason == "low_utility":
+            title = f"高频低效噪声卡片，建议改写或归档 {st['id']}"
+            rationale = (
+                f"PlugMem 效用闭环显示该卡命中 {st.get('hits', 0)} 次、噪声反馈 {st.get('noise', 0)} 次"
+                f"（效用分 {st.get('utility_score', 0):.2f}），持续稀释召回信噪比。"
+            )
+            conf = 0.86
         else:
             title = f"归档长期未复用条目 {st['id']}"
             rationale = f"该条目已超过 {st['age_days']} 天且仅出现 1 次，建议归档以保持检索信噪比。"

@@ -1,28 +1,36 @@
-"""Deterministic anti-rot provenance & freshness primitives for FlowOS.
+"""Deterministic anti-rot provenance, PlugMem utility telemetry, and Titans surprise gating.
 
-Inspired by `stalebrain` (file-drift verification) and Claude Code / `claude-mem`
-(pointer-first progressive disclosure):
-- Compiled L1 cards stay compact (summary + `source_ref` pointer).
-- Drift is checked deterministically on local files without LLM cost.
-- Recall hit counters live in sidecar `usage_stats.json` (outside immutable `ledger/`).
+Unified sidecar primitives (outside immutable `ledger/`):
+- Source-file freshness verification (`fresh` | `drifted` | `broken_ref` | `untracked`).
+- PlugMem-style Bayesian utility tracking (`usage_stats.json`: hits, useful, noise, guard_blocks).
+- Titans-style surprise & conflict scoring on incoming memories (`redundant` | `conflict` | `novel`).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 from pathlib import Path
 from typing import Any, Literal
 
-from fos.models import now_iso
+from fos.models import CompiledNode, now_iso
+from fos.tokens import extract_terms
 
 FreshnessState = Literal["fresh", "drifted", "broken_ref", "untracked"]
+FeedbackVerdict = Literal["useful", "noise", "guard_block"]
+SurpriseClass = Literal["redundant", "conflict", "novel"]
 
 _BOILERPLATE_BLOCK_RE = re.compile(
     r"<!--\s*(context7|rtk-owned)\s*-->.*?<!--\s*(/context7|context7|/rtk-owned|rtk-owned)\s*-->",
     re.DOTALL | re.IGNORECASE,
+)
+
+_NEG_POLARITY_RE = re.compile(
+    r"(?:禁止|不要|不得|不可|严禁|切勿|避免|不能|放弃|拒绝|无需|不必|\b(?:never|avoid|must\s+not|do\s+not|don't|forbid|ban|no\s+longer)\b)",
+    re.IGNORECASE,
 )
 
 
@@ -121,6 +129,11 @@ def resolve_legacy_source_ref(scope: str, source: str, meta: dict[str, Any]) -> 
     return "", ""
 
 
+# ---------------------------------------------------------------------------
+# PlugMem-Inspired Utility Feedback Loop (sidecar usage_stats.json)
+# ---------------------------------------------------------------------------
+
+
 def load_usage_stats(data_dir: Path) -> dict[str, dict[str, Any]]:
     path = Path(data_dir) / "usage_stats.json"
     if not path.exists():
@@ -132,20 +145,8 @@ def load_usage_stats(data_dir: Path) -> dict[str, dict[str, Any]]:
         return {}
 
 
-def record_recall_hits(data_dir: Path, node_ids: list[str]) -> None:
-    """Increment lightweight sidecar recall counters (outside immutable ledger/)."""
-    if not node_ids:
-        return
+def _save_usage_stats(data_dir: Path, stats: dict[str, dict[str, Any]]) -> None:
     path = Path(data_dir) / "usage_stats.json"
-    stats = load_usage_stats(data_dir)
-    ts = now_iso()
-    for nid in node_ids:
-        entry = stats.get(nid)
-        if not isinstance(entry, dict):
-            entry = {"hits": 0, "last_hit_at": ts}
-        entry["hits"] = int(entry.get("hits", 0)) + 1
-        entry["last_hit_at"] = ts
-        stats[nid] = entry
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
@@ -153,3 +154,222 @@ def record_recall_hits(data_dir: Path, node_ids: list[str]) -> None:
         os.replace(tmp, path)
     except OSError:
         pass
+
+
+def node_utility_score(entry: dict[str, Any] | None) -> float:
+    """Bayesian Beta(1,1) smoothed utility score in (0, 1); neutral 0.50 when unrated."""
+    if not entry:
+        return 0.5
+    useful = max(0, int(entry.get("useful", 0)))
+    noise = max(0, int(entry.get("noise", 0)))
+    return round((useful + 1.0) / (useful + noise + 2.0), 4)
+
+
+def utility_multiplier(entry: dict[str, Any] | None) -> float:
+    """Bounded ranking multiplier in [0.75, 1.25] (1.0 neutral for unrated nodes)."""
+    score = node_utility_score(entry)
+    return 0.75 + 0.50 * score
+
+
+def record_recall_hits(data_dir: Path, node_ids: list[str]) -> None:
+    """Increment lightweight sidecar recall counters (outside immutable ledger/)."""
+    if not node_ids:
+        return
+    stats = load_usage_stats(data_dir)
+    ts = now_iso()
+    for nid in node_ids:
+        entry = stats.get(nid)
+        if not isinstance(entry, dict):
+            entry = {"hits": 0, "useful": 0, "noise": 0, "guard_blocks": 0}
+        entry["hits"] = int(entry.get("hits", 0)) + 1
+        entry["last_hit_at"] = ts
+        entry["utility_score"] = node_utility_score(entry)
+        stats[nid] = entry
+    _save_usage_stats(data_dir, stats)
+
+
+def record_utility_feedback(
+    data_dir: Path,
+    node_id: str,
+    verdict: str,
+    *,
+    context: str = "",
+) -> dict[str, Any]:
+    """Record explicit/implicit PlugMem utility feedback (`useful` | `noise` | `guard_block`)."""
+    stats = load_usage_stats(data_dir)
+    ts = now_iso()
+    entry = stats.get(node_id)
+    if not isinstance(entry, dict):
+        entry = {"hits": 0, "useful": 0, "noise": 0, "guard_blocks": 0}
+
+    if verdict == "useful":
+        entry["useful"] = int(entry.get("useful", 0)) + 1
+    elif verdict == "noise":
+        entry["noise"] = int(entry.get("noise", 0)) + 1
+    elif verdict == "guard_block":
+        entry["guard_blocks"] = int(entry.get("guard_blocks", 0)) + 1
+        entry["useful"] = int(entry.get("useful", 0)) + 1
+    else:
+        raise ValueError(f"Invalid feedback verdict: {verdict}")
+
+    entry["last_feedback_at"] = ts
+    entry["utility_score"] = node_utility_score(entry)
+    if context.strip():
+        notes = list(entry.get("recent_notes") or [])
+        notes.append({"ts": ts, "verdict": verdict, "context": context.strip()[:160]})
+        entry["recent_notes"] = notes[-5:]
+    stats[node_id] = entry
+    _save_usage_stats(data_dir, stats)
+    return {"node_id": node_id, "verdict": verdict, **entry}
+
+
+def summarize_utility_analytics(
+    data_dir: Path,
+    active_nodes: list[CompiledNode],
+) -> dict[str, Any]:
+    """Build PlugMem utility analytics summary for dashboard & governance."""
+    stats = load_usage_stats(data_dir)
+    active_map = {n.id: n for n in active_nodes if n.status == "active"}
+
+    total_hits = 0
+    total_useful = 0
+    total_noise = 0
+    total_guard_blocks = 0
+    rated_scores: list[float] = []
+    top_useful: list[dict[str, Any]] = []
+    low_utility: list[dict[str, Any]] = []
+
+    for nid, node in active_map.items():
+        ent = stats.get(nid) or {}
+        hits = int(ent.get("hits", 0))
+        useful = int(ent.get("useful", 0))
+        noise = int(ent.get("noise", 0))
+        gblocks = int(ent.get("guard_blocks", 0))
+        util = node_utility_score(ent)
+        total_hits += hits
+        total_useful += useful
+        total_noise += noise
+        total_guard_blocks += gblocks
+        if useful + noise > 0:
+            rated_scores.append(util)
+        if useful > 0 or gblocks > 0:
+            top_useful.append(
+                {
+                    "id": nid,
+                    "scope": node.scope,
+                    "rule": node.rule[:90],
+                    "hits": hits,
+                    "useful": useful,
+                    "noise": noise,
+                    "guard_blocks": gblocks,
+                    "utility_score": util,
+                }
+            )
+        # High-hit / low-utility noise or repeatedly flagged noise
+        if (hits >= 5 and util < 0.38) or (noise >= 2 and util < 0.4):
+            low_utility.append(
+                {
+                    "id": nid,
+                    "scope": node.scope,
+                    "rule": node.rule[:90],
+                    "hits": hits,
+                    "useful": useful,
+                    "noise": noise,
+                    "utility_score": util,
+                }
+            )
+
+    top_useful.sort(key=lambda x: (-x["useful"], -x["utility_score"], -x["hits"]))
+    low_utility.sort(key=lambda x: (x["utility_score"], -x["noise"], -x["hits"]))
+    avg_util = round(sum(rated_scores) / len(rated_scores), 3) if rated_scores else 0.5
+    return {
+        "total_recall_hits": total_hits,
+        "total_useful": total_useful,
+        "total_noise": total_noise,
+        "total_guard_blocks": total_guard_blocks,
+        "rated_nodes": len(rated_scores),
+        "avg_utility": avg_util,
+        "low_utility_count": len(low_utility),
+        "top_useful": top_useful[:6],
+        "low_utility_nodes": low_utility[:6],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Titans-Inspired Surprise & Conflict Gating
+# ---------------------------------------------------------------------------
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def evaluate_surprise(
+    new_text: str,
+    new_vec: list[float],
+    candidates: list[tuple[CompiledNode, list[float]]],
+) -> dict[str, Any]:
+    """Compute Titans-style surprise score & conflict classification against active memories.
+
+    Returns:
+    - `redundant`: very high similarity (>=0.86) and same polarity (reinforce instead of duplicating)
+    - `conflict`: moderate-to-high similarity (>=0.45) with opposing negation polarity (maximum surprise!)
+    - `novel`: genuinely new information (`surprise = 1 - max_sim`)
+    """
+    if not candidates or not new_vec:
+        return {
+            "surprise": 1.0,
+            "classification": "novel",
+            "closest_node_id": None,
+            "similarity": 0.0,
+        }
+
+    new_neg = bool(_NEG_POLARITY_RE.search(new_text))
+    new_terms = extract_terms(new_text)
+    best_sim = -1.0
+    best_node: CompiledNode | None = None
+    conflict_node: CompiledNode | None = None
+    conflict_sim = 0.0
+
+    for node, vec in candidates:
+        cos = _cosine(new_vec, vec)
+        n_terms = extract_terms(node.rule)
+        shared_terms = new_terms & n_terms
+        dice = (2.0 * len(shared_terms) / max(1, len(new_terms) + len(n_terms))) if (new_terms and n_terms) else 0.0
+        sim = max(cos, dice)
+        if sim > best_sim:
+            best_sim = sim
+            best_node = node
+        node_neg = bool(_NEG_POLARITY_RE.search(node.rule))
+        if (new_neg != node_neg) and (sim >= 0.40 or (sim >= 0.30 and len(shared_terms) >= 4)) and sim > conflict_sim:
+            conflict_sim = sim
+            conflict_node = node
+
+    best_sim = max(0.0, min(1.0, best_sim))
+    if conflict_node is not None:
+        return {
+            "surprise": 1.0,
+            "classification": "conflict",
+            "closest_node_id": conflict_node.id,
+            "similarity": round(conflict_sim, 4),
+        }
+    if best_node is not None and best_sim >= 0.86:
+        return {
+            "surprise": round(1.0 - best_sim, 4),
+            "classification": "redundant",
+            "closest_node_id": best_node.id,
+            "similarity": round(best_sim, 4),
+        }
+    return {
+        "surprise": round(1.0 - best_sim, 4),
+        "classification": "novel",
+        "closest_node_id": best_node.id if best_node else None,
+        "similarity": round(best_sim, 4),
+    }

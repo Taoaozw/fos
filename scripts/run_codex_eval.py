@@ -101,9 +101,10 @@ def _run_codex(prompt: str, *, env_overrides: dict[str, str], timeout_s: int = 9
             return 124, "[TIMEOUT]", round(time.perf_counter() - t0, 2)
 
 
-def _format_fos_context(engine: BrainEngine, *, scope: str | None, recall_query: str) -> tuple[str, int]:
+def _format_fos_context(engine: BrainEngine, *, scope: str | None, recall_query: str) -> tuple[str, int, list[str]]:
     boot = engine.boot(project=scope, budget=300)
     rec = engine.recall(recall_query, scope=scope, budget=900, limit=8)
+    recalled_ids = [str(item["id"]) for item in (rec.get("results") or []) if item.get("id")]
 
     lines = [
         "以下是来自个人认知记忆引擎 FlowOS (`fos`) 的已沉淀规则与上下文（权威参考；若标记 `freshness=broken_ref` 表示其源文件已被删除、规则已失效，请勿盲从）：",
@@ -124,7 +125,7 @@ def _format_fos_context(engine: BrainEngine, *, scope: str | None, recall_query:
         if item.get("source_ref"):
             lines.append(f"  权威源文件: {item['source_ref']}")
     block = "\n".join(lines).strip()
-    return block, estimate_tokens(block)
+    return block, estimate_tokens(block), recalled_ids
 
 
 def _build_sandbox_antirot_context(scope: str, recall_query: str) -> tuple[str, int]:
@@ -166,10 +167,16 @@ def _build_sandbox_antirot_context(scope: str, recall_query: str) -> tuple[str, 
         # Simulate deletion of authoritative doc (rot!)
         doc_path.unlink()
 
-        return _format_fos_context(eng, scope=scope, recall_query=recall_query)
+        return _format_fos_context(eng, scope=scope, recall_query=recall_query)[:2]
 
 
-def _evaluate_case(case: dict[str, Any], brain_dir: Path, empty_fos_home: Path) -> CaseReport:
+def _evaluate_case(
+    case: dict[str, Any],
+    brain_dir: Path,
+    empty_fos_home: Path,
+    *,
+    record_feedback: bool = False,
+) -> CaseReport:
     cid = case["id"]
     mode = case["mode"]
     scope = case.get("scope")
@@ -197,6 +204,7 @@ def _evaluate_case(case: dict[str, Any], brain_dir: Path, empty_fos_home: Path) 
     )
 
     # --- Arm B: FlowOS-Augmented Codex ---
+    recalled_ids: list[str] = []
     if mode == "autonomous_cli":
         ctx_tokens = 0
         env_b = {"FOS_HOME": str(brain_dir.parent)}
@@ -206,7 +214,9 @@ def _evaluate_case(case: dict[str, Any], brain_dir: Path, empty_fos_home: Path) 
             ctx_block, ctx_tokens = _build_sandbox_antirot_context(scope or "sandbox-web", case["recall_query"])
         else:
             eng = BrainEngine(brain_dir)
-            ctx_block, ctx_tokens = _format_fos_context(eng, scope=scope, recall_query=case["recall_query"])
+            ctx_block, ctx_tokens, recalled_ids = _format_fos_context(
+                eng, scope=scope, recall_query=case["recall_query"]
+            )
         prompt_b = (
             f"{ctx_block}\n\n"
             f"---\n"
@@ -216,6 +226,12 @@ def _evaluate_case(case: dict[str, Any], brain_dir: Path, empty_fos_home: Path) 
         rc_b, resp_b, dt_b = _run_codex(prompt_b, env_overrides=base_env)
 
     ok_b, miss_b, forb_b = _grade(resp_b, must_match, must_not)
+    if record_feedback and mode == "ab_memory" and recalled_ids:
+        from fos.freshness import record_utility_feedback
+
+        verdict = "useful" if (ok_b and rc_b == 0) else "noise"
+        for nid in recalled_ids[:3]:
+            record_utility_feedback(brain_dir, nid, verdict, context=f"Codex eval {cid}")
     arm_b = ArmResult(
         passed=ok_b and rc_b == 0,
         latency_s=dt_b,
@@ -252,6 +268,7 @@ def main() -> int:
     )
     parser.add_argument("--workers", type=int, default=4, help="Parallel Codex workers")
     parser.add_argument("--filter", type=str, default="", help="Optional case ID substring filter")
+    parser.add_argument("--record-feedback", action="store_true", help="Record PlugMem utility feedback back to brain")
     parser.add_argument("--out", type=Path, default=None, help="Optional JSON report output path")
     args = parser.parse_args()
 
@@ -269,7 +286,13 @@ def main() -> int:
         reports_by_id: dict[str, CaseReport] = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
             futs = {
-                pool.submit(_evaluate_case, c, args.brain_dir, empty_home): c["id"]
+                pool.submit(
+                    _evaluate_case,
+                    c,
+                    args.brain_dir,
+                    empty_home,
+                    record_feedback=args.record_feedback,
+                ): c["id"]
                 for c in cases
             }
             for fut in concurrent.futures.as_completed(futs):

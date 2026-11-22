@@ -127,7 +127,7 @@ export function App() {
             </Badge>
             {dashboardQuery.data && (
               <Badge variant="secondary" className="rounded-md font-mono text-xs">
-                vec: {dashboardQuery.data.sqlite_vec ? "on" : "off"}
+                vec: {dashboardQuery.data.sqlite_vec ? "on" : "off"} · {dashboardQuery.data.embedder ?? "local_hash"}
               </Badge>
             )}
           </div>

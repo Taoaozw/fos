@@ -210,6 +210,7 @@ def build_parser() -> _StrictArgumentParser:
     p_add.add_argument("--entities", type=str, default=None, help="Comma-separated entity tags")
     p_add.add_argument("--trigger", action="append", default=None, help="Repeatable trigger_when phrase")
     p_add.add_argument("--evidence-ref", dest="evidence_ref", type=str, default=None)
+    p_add.add_argument("--guard-pattern", dest="guard_pattern", type=str, default=None, help="Deterministic static guard regex (e.g. 'cmd:...' or 'path:*.tsx :: ...')")
     p_add.add_argument("--json", action="store_true")
 
     # correct
@@ -306,6 +307,26 @@ def build_parser() -> _StrictArgumentParser:
     p_prop.add_argument("--reason", type=str, default="", help="Dismiss reason or rationale override")
     p_prop.add_argument("--force", action="store_true", help="Bypass scan cache or L0 budget guard")
     p_prop.add_argument("--json", action="store_true")
+
+    # guard
+    p_guard = sub.add_parser("guard", aliases=["gd"], help="Run deterministic 0-LLM static guardrail checks or graduate a rule")
+    p_guard.add_argument("guard_args", nargs="*", help="Optional: 'graduate <NODE_ID>'")
+    p_guard.add_argument("--staged", action="store_true", help="Check staged git diff (--cached)")
+    p_guard.add_argument("--diff", dest="diff_source", type=str, default=None, help="Diff file path or '-' for stdin")
+    p_guard.add_argument("--cmd", dest="check_cmd", type=str, default=None, help="Shell command string to check against cmd: rules")
+    p_guard.add_argument("--scope", type=str, default=None, help="Project scope (auto-detected from cwd if omitted)")
+    p_guard.add_argument("--pattern", type=str, default=None, help="Guard regex pattern when graduating a node")
+    p_guard.add_argument("--reason", type=str, default="", help="Reason when graduating a node")
+    p_guard.add_argument("--json", action="store_true")
+
+    # feedback
+    p_fb = sub.add_parser("feedback", aliases=["fb"], help="Record PlugMem utility feedback (useful/noise) for a node")
+    p_fb.add_argument("node_id", type=str)
+    fb_grp = p_fb.add_mutually_exclusive_group(required=True)
+    fb_grp.add_argument("--useful", action="store_true", help="Mark recalled node as helpful")
+    fb_grp.add_argument("--noise", action="store_true", help="Mark recalled node as noise/irrelevant")
+    p_fb.add_argument("--context", type=str, default="", help="Optional feedback context note")
+    p_fb.add_argument("--json", action="store_true")
 
     return parser
 
@@ -434,6 +455,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 entities=entities,
                 evidence_ref=args.evidence_ref,
                 trigger_when=args.trigger,
+                guard_pattern=args.guard_pattern,
             )
         elif cmd == "correct":
             result = client.correct(
@@ -510,6 +532,33 @@ def run_cli(argv: list[str] | None = None) -> int:
                 result = client.dismiss_proposal(args.proposal_id, reason=args.reason)
             else:
                 raise UsageError(f"Unknown proposals action: {args.action}")
+        elif cmd == "guard":
+            if args.guard_args:
+                if len(args.guard_args) == 2 and args.guard_args[0] == "graduate":
+                    result = client.graduate(
+                        args.guard_args[1],
+                        guard_pattern=args.pattern,
+                        reason=args.reason,
+                    )
+                else:
+                    raise UsageError("Usage: fos guard [--staged|--diff FILE|--cmd CMD] OR fos guard graduate <NODE_ID>")
+            else:
+                from fos.guard import load_git_diff
+
+                scope = args.scope or _detect_cwd_project()
+                diff_text: str | None = None
+                if args.diff_source == "-":
+                    diff_text = sys.stdin.read()
+                elif args.diff_source:
+                    diff_text = Path(args.diff_source).read_text(encoding="utf-8", errors="replace")
+                elif args.staged or not args.check_cmd:
+                    diff_text = load_git_diff(staged=bool(args.staged))
+                result = client.guard_check(diff_text=diff_text, command=args.check_cmd, scope=scope)
+                _print_result(result, as_json=as_json, command=cmd)
+                return int(ExitCode.OK if result.get("passed") else ExitCode.GATE_FAILED)
+        elif cmd == "feedback":
+            verdict = "useful" if args.useful else "noise"
+            result = client.feedback(args.node_id, verdict, context=args.context)
         else:
             raise UsageError(f"Unknown command: {cmd}")
 

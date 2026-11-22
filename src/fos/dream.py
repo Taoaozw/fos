@@ -450,6 +450,40 @@ def _compile_dream_nodes(
                 target.updated_at = atom.ts
             continue
 
+        # Replay explicit immutable graduation transition from ledger
+        grad_target_id = meta.get("graduates")
+        if grad_target_id:
+            target = nodes_by_id.get(str(grad_target_id))
+            if target is not None:
+                target.graduated = True
+                if meta.get("guard_pattern"):
+                    target.guard_pattern = str(meta["guard_pattern"]).strip()
+                if meta.get("graduate_reason"):
+                    reason = str(meta["graduate_reason"]).strip()
+                    target.rationale = (
+                        f"{target.rationale} [graduated: {reason}]".strip()
+                        if target.rationale
+                        else f"[graduated: {reason}]"
+                    )
+                target.updated_at = atom.ts
+            continue
+
+        # Replay Titans low-surprise reinforcement transition from ledger
+        reinforce_target_id = meta.get("reinforces")
+        if reinforce_target_id:
+            target = nodes_by_id.get(str(reinforce_target_id))
+            if target is not None:
+                target.seen_count += 1
+                day = atom.ts[:10] if len(atom.ts) >= 10 else ""
+                if day and day not in target.seen_dates:
+                    target.seen_dates.append(day)
+                    target.seen_dates.sort()
+                if atom.id not in target.evidence_ids:
+                    target.evidence_ids.append(atom.id)
+                target.l0 = build_l0_line(target)
+                target.updated_at = atom.ts
+            continue
+
         atom_kind = atom.kind
         origin_scope = (atom.scope or "global").strip().lower()
         atom_scope = origin_scope
@@ -589,6 +623,8 @@ def _compile_dream_nodes(
             rule=rule,
             rationale=rationale,
             guard_hint=guard_hint,
+            guard_pattern=str(meta.get("guard_pattern") or ""),
+            graduated=bool(meta.get("graduated", False)),
             source_ref=source_ref,
             source_hash=source_hash,
             verified_at=verified_at,
@@ -655,6 +691,18 @@ def _compile_dream_nodes(
                         meta={"atom_id": atom.id},
                     )
                 )
+
+        conflict_id = meta.get("surprise_conflict_with")
+        if conflict_id and str(conflict_id) in nodes_by_id and str(conflict_id) != node.id:
+            edges.append(
+                GraphEdge(
+                    src_id=node.id,
+                    dst_id=str(conflict_id),
+                    edge_type="CONTRADICTS",
+                    valid_from=atom.ts,
+                    meta={"atom_id": atom.id, "detector": "surprise_gate"},
+                )
+            )
 
         if node.scope and node.scope != "global":
             edges.append(

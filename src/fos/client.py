@@ -342,6 +342,7 @@ class FosClient:
         source_ref: str | None = None,
         source_hash: str | None = None,
         verified_at: str | None = None,
+        guard_pattern: str | None = None,
     ) -> dict[str, Any]:
         if kind not in VALID_KINDS:
             raise UsageError(f"Invalid kind '{kind}'. Must be one of: {', '.join(VALID_KINDS)}")
@@ -365,6 +366,8 @@ class FosClient:
             meta["source_hash"] = source_hash
         if verified_at:
             meta["verified_at"] = verified_at
+        if guard_pattern:
+            meta["guard_pattern"] = guard_pattern
 
         if not self.is_remote:
             return self._engine().add_atom(
@@ -741,4 +744,50 @@ class FosClient:
             "POST",
             f"/v1/proposals/{proposal_id}/dismiss",
             json_body={"reason": reason},
+        )
+
+    def guard_check(
+        self,
+        *,
+        diff_text: str | None = None,
+        command: str | None = None,
+        scope: str | None = None,
+    ) -> dict[str, Any]:
+        if not self.is_remote:
+            from fos.guard import check_guard
+
+            return check_guard(self._engine(), diff_text=diff_text, command=command, scope=scope)
+        return self._request(
+            "POST",
+            "/v1/guard/check",
+            json_body={"diff_text": diff_text, "command": command, "scope": scope},
+        )
+
+    def graduate(
+        self,
+        node_id: str,
+        *,
+        guard_pattern: str | None = None,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        if not self.is_remote:
+            return self._engine().graduate_node(
+                node_id,
+                guard_pattern=guard_pattern,
+                reason=reason,
+                device=self.cfg.device,
+            )
+        return self._request(
+            "POST",
+            f"/v1/nodes/{node_id}/graduate",
+            json_body={"guard_pattern": guard_pattern, "reason": reason, "device": self.cfg.device},
+        )
+
+    def feedback(self, node_id: str, verdict: str, *, context: str = "") -> dict[str, Any]:
+        if not self.is_remote:
+            return self._engine().feedback_node(node_id, verdict, context=context)
+        return self._request(
+            "POST",
+            f"/v1/nodes/{node_id}/feedback",
+            json_body={"verdict": verdict, "context": context},
         )

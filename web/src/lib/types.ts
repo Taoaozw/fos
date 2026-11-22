@@ -26,11 +26,17 @@ export interface CompiledNode {
   rule: string
   rationale: string
   guard_hint: string
+  guard_pattern?: string
+  graduated?: boolean
   source_ref?: string
   source_hash?: string
   verified_at?: string
   freshness?: "fresh" | "drifted" | "broken_ref" | "untracked" | string
   recall_hits?: number
+  useful_count?: number
+  noise_count?: number
+  guard_blocks?: number
+  utility_score?: number
   entities: string[]
   contradicts: string[]
   evidence_ids: string[]
@@ -61,11 +67,23 @@ export interface LedgerAtom {
   meta: Record<string, unknown>
 }
 
+export interface UtilityTopItem {
+  id: string
+  scope: string
+  rule: string
+  hits: number
+  useful: number
+  noise: number
+  guard_blocks?: number
+  utility_score: number
+}
+
 export interface DashboardResponse {
   snapshot_version: string | null
   history: string[]
   rejected_snapshots: string[]
   sqlite_vec: boolean
+  embedder?: string
   meta: Record<string, string>
   counts: {
     total_nodes: number
@@ -85,6 +103,19 @@ export interface DashboardResponse {
     pointer_coverage_pct: number
     drifted_nodes: number
     broken_ref_nodes: number
+    guard_rules_count?: number
+    graduated_nodes?: number
+  }
+  utility?: {
+    total_recall_hits: number
+    total_useful: number
+    total_noise: number
+    total_guard_blocks: number
+    rated_nodes: number
+    avg_utility: number
+    low_utility_count: number
+    top_useful: UtilityTopItem[]
+    low_utility_nodes: UtilityTopItem[]
   }
   distributions: {
     by_status: Record<string, number>

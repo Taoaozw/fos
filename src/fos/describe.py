@@ -270,6 +270,35 @@ COMMAND_SPECS: list[dict[str, Any]] = [
             {"name": "--json", "type": "bool", "default": "false", "desc": "JSON output"},
         ],
     },
+    {
+        "name": "guard",
+        "aliases": ["gd"],
+        "readOnly": False,
+        "summary": "Run deterministic 0-LLM static guardrail checks on git diffs or shell commands, or graduate a rule to mechanical guard",
+        "usage": "fos guard [--staged | --diff [FILE] | --cmd CMD] [--scope SCOPE] [--json] | fos guard graduate <ID> [--pattern REGEX] [--reason TEXT]",
+        "flags": [
+            {"name": "--staged", "type": "bool", "default": "false", "desc": "check git diff --cached in current repo"},
+            {"name": "--diff", "type": "string", "default": "", "desc": "diff file path or '-' for stdin"},
+            {"name": "--cmd", "type": "string", "default": "", "desc": "shell command to check against cmd: guard patterns"},
+            {"name": "--scope", "type": "string", "default": "", "desc": "project scope (auto-detected from cwd if omitted)"},
+            {"name": "--pattern", "type": "string", "default": "", "desc": "static guard pattern when graduating a rule"},
+            {"name": "--reason", "type": "string", "default": "", "desc": "graduation reason"},
+            {"name": "--json", "type": "bool", "default": "false", "desc": "JSON output"},
+        ],
+    },
+    {
+        "name": "feedback",
+        "aliases": ["fb"],
+        "readOnly": False,
+        "summary": "Record PlugMem utility feedback (useful/noise) for a recalled memory node",
+        "usage": "fos feedback <NODE_ID> (--useful | --noise) [--context TEXT] [--json]",
+        "flags": [
+            {"name": "--useful", "type": "bool", "default": "false", "desc": "mark node as helpful in retrieval"},
+            {"name": "--noise", "type": "bool", "default": "false", "desc": "mark node as noisy/irrelevant in retrieval"},
+            {"name": "--context", "type": "string", "default": "", "desc": "optional short feedback note"},
+            {"name": "--json", "type": "bool", "default": "false", "desc": "JSON output"},
+        ],
+    },
 ]
 
 

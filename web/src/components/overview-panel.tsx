@@ -195,6 +195,93 @@ export function OverviewPanel({ dashboard }: OverviewPanelProps) {
           </CardContent>
         </Card>
       </div>
+
+      {/* PlugMem Utility & Guardrail Analytics */}
+      {dashboard.utility && (
+        <Card>
+          <CardHeader className="pb-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <CardTitle className="text-sm font-medium">
+                  召回效用闭环 &amp; 确定性守卫分析 (PlugMem / Harness)
+                </CardTitle>
+                <CardDescription>
+                  追踪每次召回的真实命中、有用/噪声反馈与静态护栏硬拦截次数
+                </CardDescription>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Badge variant="outline" className="font-mono text-xs">
+                  命中 {dashboard.utility.total_recall_hits}
+                </Badge>
+                <Badge variant="secondary" className="font-mono text-xs">
+                  有用 {dashboard.utility.total_useful}
+                </Badge>
+                <Badge variant="outline" className="font-mono text-xs">
+                  噪声 {dashboard.utility.total_noise}
+                </Badge>
+                <Badge variant="outline" className="font-mono text-xs">
+                  护栏拦截 {dashboard.utility.total_guard_blocks}
+                </Badge>
+                <Badge variant="outline" className="font-mono text-xs">
+                  静态规则 {dashboard.hygiene?.guard_rules_count ?? 0} · 毕业 {dashboard.hygiene?.graduated_nodes ?? 0}
+                </Badge>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <div className="flex flex-col gap-2">
+              <div className="text-xs font-medium text-muted-foreground">
+                高价值卡片 Top Useful
+              </div>
+              {dashboard.utility.top_useful.length === 0 ? (
+                <div className="text-xs text-muted-foreground">
+                  暂无正反馈记录（可在 Cards 面板或 `fos feedback` 标记有用）
+                </div>
+              ) : (
+                dashboard.utility.top_useful.map((item) => (
+                  <div
+                    key={item.id}
+                    className="flex items-center justify-between gap-2 rounded-md border border-border bg-muted/30 px-2.5 py-1.5 text-xs"
+                  >
+                    <div className="min-w-0 flex-1 truncate">
+                      <span className="mr-1.5 font-mono text-foreground">{item.id}</span>
+                      <span className="text-muted-foreground">{item.rule}</span>
+                    </div>
+                    <Badge variant="secondary" className="shrink-0 font-mono text-xs">
+                      +{item.useful} · {(item.utility_score * 100).toFixed(0)}%
+                    </Badge>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="flex flex-col gap-2">
+              <div className="text-xs font-medium text-muted-foreground">
+                高频低效噪声候选 Low Utility ({dashboard.utility.low_utility_count})
+              </div>
+              {dashboard.utility.low_utility_nodes.length === 0 ? (
+                <div className="text-xs text-muted-foreground">
+                  当前无低效噪声卡片
+                </div>
+              ) : (
+                dashboard.utility.low_utility_nodes.map((item) => (
+                  <div
+                    key={item.id}
+                    className="flex items-center justify-between gap-2 rounded-md border border-border bg-muted/30 px-2.5 py-1.5 text-xs"
+                  >
+                    <div className="min-w-0 flex-1 truncate">
+                      <span className="mr-1.5 font-mono text-foreground">{item.id}</span>
+                      <span className="text-muted-foreground">{item.rule}</span>
+                    </div>
+                    <Badge variant="destructive" className="shrink-0 font-mono text-xs">
+                      噪声 {item.noise} · {(item.utility_score * 100).toFixed(0)}%
+                    </Badge>
+                  </div>
+                ))
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   )
 }

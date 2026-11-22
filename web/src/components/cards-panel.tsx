@@ -6,6 +6,8 @@ import {
   IconPin,
   IconSearch,
   IconShieldCheck,
+  IconThumbDown,
+  IconThumbUp,
 } from "@tabler/icons-react"
 import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
@@ -89,6 +91,18 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode }: CardsPan
     mutationFn: (id: string) => fosApi.pinNode(id),
     onSuccess: (res) => {
       toast.success(`已将 ${res.pinned_node} 钉入永久 P0 回归集`)
+      void queryClient.invalidateQueries({ queryKey: ["fos"] })
+    },
+    onError: (err: Error) => toast.error(err.message),
+  })
+
+  const feedbackMutation = useMutation({
+    mutationFn: (input: { id: string; verdict: "useful" | "noise" }) =>
+      fosApi.feedbackNode(input.id, input.verdict),
+    onSuccess: (res, vars) => {
+      toast.success(
+        `${vars.verdict === "useful" ? "已记为有用" : "已记为噪声"}（效用分 ${(res.utility_score * 100).toFixed(0)}%）`
+      )
       void queryClient.invalidateQueries({ queryKey: ["fos"] })
     },
     onError: (err: Error) => toast.error(err.message),
@@ -310,8 +324,35 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode }: CardsPan
                         {detailNode.freshness}
                       </Badge>
                     )}
+                    {detailNode.graduated && (
+                      <Badge variant="secondary" className="rounded-md font-mono text-xs">
+                        graduated
+                      </Badge>
+                    )}
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      disabled={feedbackMutation.isPending}
+                      onClick={() =>
+                        feedbackMutation.mutate({ id: detailNode.id, verdict: "useful" })
+                      }
+                    >
+                      <IconThumbUp className="size-3.5" />
+                      有用
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="xs"
+                      disabled={feedbackMutation.isPending}
+                      onClick={() =>
+                        feedbackMutation.mutate({ id: detailNode.id, verdict: "noise" })
+                      }
+                    >
+                      <IconThumbDown className="size-3.5" />
+                      噪声
+                    </Button>
                     <Button
                       variant="outline"
                       size="xs"
@@ -350,8 +391,9 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode }: CardsPan
                   {detailNode.rule}
                 </CardTitle>
                 <CardDescription className="font-mono text-xs">
-                  Seen {detailNode.seen_count}× ({(detailNode.seen_dates || []).join(", ") || "-"}) ·
-                  conf {detailNode.confidence} · {(detailNode.valid_from || "").slice(0, 19)} →{" "}
+                  Seen {detailNode.seen_count}× · hits {detailNode.recall_hits ?? 0} ·
+                  utility {Math.round((detailNode.utility_score ?? 0.5) * 100)}% (+{detailNode.useful_count ?? 0}/-{detailNode.noise_count ?? 0}) ·{" "}
+                  {(detailNode.valid_from || "").slice(0, 19)} →{" "}
                   {detailNode.valid_until ? detailNode.valid_until.slice(0, 19) : "present"}
                 </CardDescription>
               </CardHeader>
@@ -369,6 +411,17 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode }: CardsPan
                     >
                       跳转查看
                     </Button>
+                  </div>
+                )}
+
+                {detailNode.guard_pattern && (
+                  <div className="flex flex-col gap-1">
+                    <div className="text-xs font-medium text-muted-foreground">
+                      确定性静态守卫 Guard Pattern (fos guard)
+                    </div>
+                    <div className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-foreground break-all">
+                      {detailNode.guard_pattern}
+                    </div>
                   </div>
                 )}
 

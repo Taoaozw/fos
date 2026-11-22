@@ -102,6 +102,8 @@ class CompiledNode:
     rule: str = ""
     rationale: str = ""
     guard_hint: str = ""
+    guard_pattern: str = ""  # Deterministic static guard (e.g. `cmd:mygo build -upload` or `path:*.tsx !components/ui :: <button\b`)
+    graduated: bool = False  # True once mechanically enforced via CI/lint/fos guard (excluded from L0 boot)
     source_ref: str = ""  # Authoritative pointer (e.g. /abs/path/docs/DESIGN.md#section or git:repo@sha)
     source_hash: str = ""  # 16-char SHA-256 of authoritative source content at capture/verify time
     verified_at: str = ""  # YYYY-MM-DD when last verified against authoritative source
@@ -129,6 +131,8 @@ class CompiledNode:
             "rule": self.rule,
             "rationale": self.rationale,
             "guard_hint": self.guard_hint,
+            "guard_pattern": self.guard_pattern,
+            "graduated": bool(self.graduated),
             "source_ref": self.source_ref,
             "source_hash": self.source_hash,
             "verified_at": self.verified_at,
@@ -162,6 +166,8 @@ class CompiledNode:
             rule=str(data.get("rule", "")),
             rationale=str(data.get("rationale", "")),
             guard_hint=str(data.get("guard_hint", "")),
+            guard_pattern=str(data.get("guard_pattern", "")),
+            graduated=bool(data.get("graduated", False)),
             source_ref=str(data.get("source_ref", "")),
             source_hash=str(data.get("source_hash", "")),
             verified_at=str(data.get("verified_at", "")),

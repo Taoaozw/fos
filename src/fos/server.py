@@ -21,6 +21,7 @@ from fos.dream import run_dream
 from fos.engine import BrainEngine
 from fos.errors import FosError, GateFailedError, NotFoundError, UsageError
 from fos.eval_gate import pin_node_in_engine, run_eval_on_engine
+from fos.guard import check_guard
 from fos.proposals import (
     ProposalStateError,
     accept_proposal,
@@ -93,6 +94,23 @@ class ProposalAcceptRequest(BaseModel):
 
 class ProposalDismissRequest(BaseModel):
     reason: str = ""
+
+
+class GuardCheckRequest(BaseModel):
+    diff_text: str | None = None
+    command: str | None = None
+    scope: str | None = None
+
+
+class GraduateRequest(BaseModel):
+    guard_pattern: str | None = None
+    reason: str = ""
+    device: str | None = None
+
+
+class FeedbackRequest(BaseModel):
+    verdict: str  # useful | noise
+    context: str = ""
 
 
 def _http_from_fos_error(exc: FosError) -> HTTPException:
@@ -440,6 +458,39 @@ def create_app(
     def proposals_dismiss(proposal_id: str, req: ProposalDismissRequest) -> dict[str, Any]:
         try:
             return dismiss_proposal(brain, proposal_id, reason=req.reason)
+        except FosError as exc:
+            raise _http_from_fos_error(exc) from exc
+
+    # --- Deterministic Guardrails & PlugMem Utility Feedback ---
+
+    @app.post("/v1/guard/check", dependencies=[Depends(require_auth)])
+    def guard_check(req: GuardCheckRequest) -> dict[str, Any]:
+        try:
+            return check_guard(
+                brain,
+                diff_text=req.diff_text,
+                command=req.command,
+                scope=req.scope,
+            )
+        except FosError as exc:
+            raise _http_from_fos_error(exc) from exc
+
+    @app.post("/v1/nodes/{node_id}/graduate", dependencies=[Depends(require_auth)])
+    def graduate_node(node_id: str, req: GraduateRequest) -> dict[str, Any]:
+        try:
+            return brain.graduate_node(
+                node_id,
+                guard_pattern=req.guard_pattern,
+                reason=req.reason,
+                device=req.device,
+            )
+        except FosError as exc:
+            raise _http_from_fos_error(exc) from exc
+
+    @app.post("/v1/nodes/{node_id}/feedback", dependencies=[Depends(require_auth)])
+    def feedback_node(node_id: str, req: FeedbackRequest) -> dict[str, Any]:
+        try:
+            return brain.feedback_node(node_id, req.verdict, context=req.context)
         except FosError as exc:
             raise _http_from_fos_error(exc) from exc
 
