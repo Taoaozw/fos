@@ -122,28 +122,46 @@ class MLXEmbedder:
         # Keep dim lazy so read-only commands like `fos boot` never load GPU weights at startup
         return self._dim if self._dim is not None else self._fallback_dim
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def _format_texts(self, texts: list[str], *, is_query: bool) -> list[str]:
+        low = self._model_name.lower()
+        if "qwen3-embedding" in low:
+            if is_query:
+                inst = "Instruct: Retrieve relevant personal engineering rules, architecture decisions, and lessons.\nQuery: "
+                return [t if t.startswith("Instruct:") else f"{inst}{t}" for t in texts]
+            return texts
+        if "e5" in low:
+            prefix = "query: " if is_query else "passage: "
+            return [t if t.startswith(("query:", "passage:")) else f"{prefix}{t}" for t in texts]
+        return texts
+
+    def embed(self, texts: list[str], *, is_query: bool = False) -> list[list[float]]:
         if not texts:
             return []
         try:
             self._ensure_loaded()
             from mlx_embeddings import generate  # type: ignore[import-not-found]
 
-            is_e5 = "e5" in self._model_name.lower()
-            prepared = [f"query: {t}" if (is_e5 and not t.startswith(("query:", "passage:"))) else t for t in texts]
-            output = generate(self._model, self._tokenizer, texts=prepared)
-            embs = getattr(output, "text_embeds", output)
-            rows = embs.tolist() if hasattr(embs, "tolist") else [list(r) for r in embs]
+            prepared = self._format_texts(texts, is_query=is_query)
             normed: list[list[float]] = []
-            for row in rows:
-                vals = [float(x) for x in row]
-                n = math.sqrt(sum(v * v for v in vals))
-                normed.append([v / n for v in vals] if n > 0 else vals)
+            batch_size = 16
+            for start in range(0, len(prepared), batch_size):
+                chunk = prepared[start : start + batch_size]
+                output = generate(self._model, self._tokenizer, texts=chunk)
+                embs = getattr(output, "text_embeds", output)
+                rows = embs.tolist() if hasattr(embs, "tolist") else [list(r) for r in embs]
+                for row in rows:
+                    vals = [float(x) for x in row]
+                    n = math.sqrt(sum(v * v for v in vals))
+                    normed.append([v / n for v in vals] if n > 0 else vals)
             if normed:
                 self._dim = len(normed[0])
             return normed
         except ImportError:
             return LocalHashEmbedder(dim=self._fallback_dim).embed(texts)
+
+    def embed_query(self, query: str) -> list[float]:
+        vecs = self.embed([query], is_query=True)
+        return vecs[0] if vecs else []
 
     def unload(self) -> None:
         self._model = None

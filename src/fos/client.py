@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from fos.config import FosConfig, load_config, save_config
+from fos.config import FosConfig, default_fos_home, load_config, save_config
 from fos.dream import run_dream
 from fos.engine import (
     BrainEngine,
@@ -251,6 +251,55 @@ class FosClient:
             with self._open_offline_cache() as db:
                 return query_snapshot_boot(db, project=project, budget=budget, mode="offline_cache")
 
+    def _try_local_daemon(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """In local mode on default FOS_HOME, reuse warm local `fosd` daemon (keeps MLX GPU weights hot)."""
+        if self.is_remote or self.http_transport is not None:
+            return None
+        if os.environ.get("FOS_NO_LOCAL_DAEMON") == "1":
+            return None
+        if self.home != default_fos_home():
+            return None
+        # Only worthwhile when a heavy embedder (e.g. mlx) is configured
+        if self.cfg.providers.embedder == "local_hash":
+            return None
+
+        port = int(os.environ.get("FOS_LOCAL_PORT", "7622"))
+        url = f"http://127.0.0.1:{port}{path}"
+        headers: dict[str, str] = {"Accept": "application/json"}
+        tok = self.cfg.token
+        if not tok:
+            tok_file = self.home / ".initial_client_token"
+            if tok_file.is_file():
+                try:
+                    tok = tok_file.read_text(encoding="utf-8").strip()
+                except OSError:
+                    tok = ""
+        if tok:
+            headers["Authorization"] = f"Bearer {tok}"
+
+        clean_params = {k: v for k, v in (params or {}).items() if v is not None}
+        try:
+            import httpx
+
+            timeout = httpx.Timeout(10.0, connect=0.15)
+            with httpx.Client(timeout=timeout) as hc:
+                resp = hc.request(method, url, headers=headers, params=clean_params, json=json_body)
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, dict):
+                    data["mode"] = "local_daemon"
+                    return data
+        except Exception:
+            return None
+        return None
+
     def recall(
         self,
         query: str,
@@ -262,6 +311,13 @@ class FosClient:
         limit: int = 20,
     ) -> dict[str, Any]:
         if not self.is_remote:
+            warm = self._try_local_daemon(
+                "GET",
+                "/v1/recall",
+                params={"q": query, "kind": kind, "scope": scope, "as_of": as_of, "budget": budget, "limit": limit},
+            )
+            if warm is not None:
+                return warm
             return self._engine().recall(query, kind=kind, scope=scope, as_of=as_of, budget=budget, limit=limit)
         try:
             return self._request(
@@ -312,6 +368,13 @@ class FosClient:
 
     def mirror(self, proposal: str, *, scope: str | None = None) -> dict[str, Any]:
         if not self.is_remote:
+            warm = self._try_local_daemon(
+                "POST",
+                "/v1/mirror",
+                json_body={"proposal": proposal, "scope": scope},
+            )
+            if warm is not None:
+                return warm
             return self._engine().mirror(proposal, scope=scope)
         try:
             return self._request("POST", "/v1/mirror", json_body={"proposal": proposal, "scope": scope})

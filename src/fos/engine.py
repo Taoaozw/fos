@@ -289,9 +289,14 @@ def query_snapshot_recall(
     # Way 2: Vector KNN (sqlite-vec)
     vec_hits: list[tuple[str, float]] = []
     if embedder is not None:
-        q_vecs = embedder.embed([query])
-        if q_vecs:
-            vec_hits = [(nid, sc) for nid, sc in db.search_vec(q_vecs[0], limit=40) if nid in valid_map]
+        q_vec: list[float] | None = None
+        if hasattr(embedder, "embed_query"):
+            q_vec = embedder.embed_query(query)
+        else:
+            q_vecs = embedder.embed([query])
+            q_vec = q_vecs[0] if q_vecs else None
+        if q_vec:
+            vec_hits = [(nid, sc) for nid, sc in db.search_vec(q_vec, limit=40) if nid in valid_map]
 
     # Way 3: Trigger & Entity direct match + 1-2 Hop Graph Expansion
     q_terms = extract_terms(query)
