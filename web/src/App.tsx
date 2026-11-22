@@ -37,12 +37,14 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { ApiError, fosApi, getStoredToken, setStoredToken } from "@/lib/api"
+import type { CardFilterPreset } from "@/lib/types"
 
 export function App() {
   const [token, setToken] = useState<string>(() => getStoredToken())
   const [authError, setAuthError] = useState<string>("")
   const [activeTab, setActiveTab] = useState<string>("overview")
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const [cardFilterPreset, setCardFilterPreset] = useState<CardFilterPreset | null>(null)
   const [isDark, setIsDark] = useState<boolean>(true)
   const [themeVersion, setThemeVersion] = useState<number>(0)
 
@@ -110,6 +112,11 @@ export function App() {
 
   const handleJumpToCard = (nodeId: string) => {
     setSelectedNodeId(nodeId)
+    setActiveTab("cards")
+  }
+
+  const handleFilterCards = (opts: { scope?: string; special?: "all" | "patterns" | "issues" | "guards" }) => {
+    setCardFilterPreset({ ...opts, nonce: Date.now() })
     setActiveTab("cards")
   }
 
@@ -211,7 +218,11 @@ export function App() {
             </TabsList>
 
             <TabsContent value="overview">
-              <OverviewPanel dashboard={dashboardQuery.data} />
+              <OverviewPanel
+                dashboard={dashboardQuery.data}
+                onJumpToCard={handleJumpToCard}
+                onFilterCards={handleFilterCards}
+              />
             </TabsContent>
 
             <TabsContent value="proposals">
@@ -223,6 +234,7 @@ export function App() {
                 dashboard={dashboardQuery.data}
                 selectedNodeId={selectedNodeId}
                 onSelectNode={setSelectedNodeId}
+                filterPreset={cardFilterPreset}
               />
             </TabsContent>
 

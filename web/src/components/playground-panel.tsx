@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react"
 import { useMutation } from "@tanstack/react-query"
-import { IconEyeCheck, IconSearch } from "@tabler/icons-react"
+import { IconAlertTriangle, IconEyeCheck, IconSearch } from "@tabler/icons-react"
 import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -26,6 +26,7 @@ export function PlaygroundPanel({ dashboard, onJumpToCard }: PlaygroundPanelProp
   const [query, setQuery] = useState("")
   const [recScope, setRecScope] = useState("__all__")
   const [asOf, setAsOf] = useState("")
+  const [cwdStack, setCwdStack] = useState("")
   const [budget, setBudget] = useState("1200")
   const [recallRes, setRecallRes] = useState<RecallResponse | null>(null)
 
@@ -40,6 +41,7 @@ export function PlaygroundPanel({ dashboard, onJumpToCard }: PlaygroundPanelProp
         scope: recScope === "__all__" ? undefined : recScope,
         asOf: asOf.trim() || undefined,
         budget: Number(budget) || 1200,
+        cwdStack: cwdStack.trim() || undefined,
       }),
     onSuccess: (res) => setRecallRes(res),
     onError: (err: Error) => toast.error(err.message),
@@ -99,19 +101,39 @@ export function PlaygroundPanel({ dashboard, onJumpToCard }: PlaygroundPanelProp
                 value={asOf}
                 onChange={(e) => setAsOf(e.target.value)}
                 placeholder="--as-of 如 2026-08"
-                className="h-8 w-40 font-mono text-xs"
+                className="h-8 w-36 font-mono text-xs"
               />
               <Input
                 type="number"
                 value={budget}
                 onChange={(e) => setBudget(e.target.value)}
-                className="h-8 w-24 font-mono text-xs"
+                className="h-8 w-20 font-mono text-xs"
                 min={100}
                 max={8000}
               />
               <Button type="submit" size="sm" disabled={recallMutation.isPending}>
                 <IconSearch className="size-3.5" />
                 {recallMutation.isPending ? "检索中..." : "执行 Recall"}
+              </Button>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                value={cwdStack}
+                onChange={(e) => setCwdStack(e.target.value)}
+                placeholder="模拟当前项目栈（可选，如 kotlin=2.4,spring-boot=5.0）"
+                className="h-8 flex-1 font-mono text-xs"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="xs"
+                className="font-normal text-xs"
+                onClick={() => {
+                  setQuery("Kotlin WebFlux zero-copy streaming low memory")
+                  setCwdStack("kotlin=2.4,spring-boot=5.0,webflux=5.0")
+                }}
+              >
+                填入 Boot 5.0 漂移示例
               </Button>
             </div>
           </form>
@@ -126,42 +148,83 @@ export function PlaygroundPanel({ dashboard, onJumpToCard }: PlaygroundPanelProp
               {recallRes.results.length === 0 ? (
                 <div className="text-xs text-muted-foreground">无命中结果</div>
               ) : (
-                recallRes.results.map((r) => (
-                  <div
-                    key={r.id}
-                    onClick={() => onJumpToCard(r.id)}
-                    className="cursor-pointer rounded-lg border border-border bg-muted/20 p-3 transition-colors hover:border-foreground/40"
-                  >
-                    <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <Badge variant="outline" className="rounded-md font-mono text-xs">
-                          {r.id}
-                        </Badge>
-                        <Badge
-                          variant={r.severity === "P0" ? "destructive" : "secondary"}
-                          className="rounded-md font-mono text-xs"
-                        >
-                          {r.severity}
-                        </Badge>
-                        <Badge variant="outline" className="rounded-md font-mono text-xs">
-                          {r.scope}
-                        </Badge>
-                        {r.channels.map((ch) => (
-                          <Badge key={ch} variant="outline" className="rounded-md font-mono text-xs">
-                            {ch}
-                          </Badge>
-                        ))}
+                (() => {
+                  const maxScore = Math.max(0.01, ...recallRes.results.map((x) => x.score))
+                  return recallRes.results.map((r) => {
+                    const scorePct = Math.min(100, Math.round((r.score / maxScore) * 100))
+                    return (
+                      <div
+                        key={r.id}
+                        onClick={() => onJumpToCard(r.id)}
+                        className="cursor-pointer rounded-lg border border-border bg-muted/20 p-3 transition-colors hover:border-foreground/40"
+                      >
+                        <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <Badge variant="outline" className="rounded-md font-mono text-xs">
+                              {r.id}
+                            </Badge>
+                            <Badge
+                              variant={r.severity === "P0" ? "destructive" : "secondary"}
+                              className="rounded-md font-mono text-xs"
+                            >
+                              {r.severity}
+                            </Badge>
+                            <Badge variant="outline" className="rounded-md font-mono text-xs">
+                              {r.scope}
+                            </Badge>
+                            {r.compat?.pattern === "code_exemplar" && (
+                              <Badge variant="secondary" className="rounded-md font-mono text-xs">
+                                pattern:{r.compat.lang ?? "code"}
+                              </Badge>
+                            )}
+                            {r.freshness && r.freshness !== "untracked" && (
+                              <Badge
+                                variant={r.freshness === "broken_ref" ? "destructive" : "outline"}
+                                className="rounded-md font-mono text-xs"
+                              >
+                                {r.freshness}
+                              </Badge>
+                            )}
+                            {r.channels.map((ch) => (
+                              <Badge key={ch} variant="outline" className="rounded-md font-mono text-xs">
+                                {ch}
+                              </Badge>
+                            ))}
+                          </div>
+                          <div className="flex items-center gap-2 font-mono text-xs text-muted-foreground">
+                            <div className="h-1.5 w-14 overflow-hidden rounded-full bg-muted">
+                              <div
+                                className="h-full rounded-full bg-chart-1"
+                                style={{ width: `${scorePct}%` }}
+                              />
+                            </div>
+                            <span>{r.score}</span>
+                          </div>
+                        </div>
+                        <div className="text-sm font-medium text-foreground">{r.rule}</div>
+                        {r.rationale && (
+                          <div className="mt-1 text-xs text-muted-foreground">{r.rationale}</div>
+                        )}
+                        {r.source_ref && (
+                          <div className="mt-1.5 truncate font-mono text-xs text-muted-foreground">
+                            {r.source_ref}
+                          </div>
+                        )}
+                        {r.compat_check?.status === "major_drift" && (
+                          <div className="mt-2 flex items-start gap-1.5 rounded-md border border-border bg-muted/50 px-2.5 py-1.5 text-xs text-foreground">
+                            <IconAlertTriangle className="mt-0.5 size-3.5 shrink-0 text-destructive" />
+                            <div>
+                              <span className="font-mono font-medium">
+                                SemVer major_drift ({(r.compat_check.drifts ?? []).join(", ")})：
+                              </span>
+                              <span className="text-muted-foreground">{r.compat_check.note}</span>
+                            </div>
+                          </div>
+                        )}
                       </div>
-                      <div className="font-mono text-xs text-muted-foreground">
-                        score={r.score}
-                      </div>
-                    </div>
-                    <div className="text-sm font-medium text-foreground">{r.rule}</div>
-                    {r.rationale && (
-                      <div className="mt-1 text-xs text-muted-foreground">{r.rationale}</div>
-                    )}
-                  </div>
-                ))
+                    )
+                  })
+                })()
               )}
             </div>
           )}
@@ -215,7 +278,11 @@ export function PlaygroundPanel({ dashboard, onJumpToCard }: PlaygroundPanelProp
                   <div className="text-muted-foreground">无</div>
                 ) : (
                   mirrorRes.conflicts.map((c) => (
-                    <div key={c.id} className="rounded-md border border-border bg-muted/30 p-2.5 font-mono">
+                    <div
+                      key={c.id}
+                      onClick={() => onJumpToCard(c.id)}
+                      className="cursor-pointer rounded-md border border-border bg-muted/30 p-2.5 font-mono transition-colors hover:border-foreground/40"
+                    >
                       [{c.id}] {c.rule}
                     </div>
                   ))
@@ -230,7 +297,11 @@ export function PlaygroundPanel({ dashboard, onJumpToCard }: PlaygroundPanelProp
                   <div className="text-muted-foreground">无</div>
                 ) : (
                   mirrorRes.lesson_warnings.map((w) => (
-                    <div key={w.id} className="rounded-md border border-border bg-muted/30 p-2.5 font-mono">
+                    <div
+                      key={w.id}
+                      onClick={() => onJumpToCard(w.id)}
+                      className="cursor-pointer rounded-md border border-border bg-muted/30 p-2.5 font-mono transition-colors hover:border-foreground/40"
+                    >
                       [{w.id} | seen:{w.seen_count}] {w.rule}
                     </div>
                   ))
@@ -245,7 +316,11 @@ export function PlaygroundPanel({ dashboard, onJumpToCard }: PlaygroundPanelProp
                   <div className="text-muted-foreground">无</div>
                 ) : (
                   mirrorRes.prior_decisions.map((d) => (
-                    <div key={d.id} className="rounded-md border border-border bg-muted/30 p-2.5 font-mono">
+                    <div
+                      key={d.id}
+                      onClick={() => onJumpToCard(d.id)}
+                      className="cursor-pointer rounded-md border border-border bg-muted/30 p-2.5 font-mono transition-colors hover:border-foreground/40"
+                    >
                       [{d.id} | {d.status}] {d.rule}
                     </div>
                   ))

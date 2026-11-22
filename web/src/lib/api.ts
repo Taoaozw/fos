@@ -120,13 +120,20 @@ export const fosApi = {
       `/v1/nodes/${encodeURIComponent(id)}/graduate`,
       { guard_pattern: guardPattern || null, reason }
     ),
-  recall: (input: { q: string; scope?: string; asOf?: string; budget?: number }) => {
+  recall: (input: {
+    q: string
+    scope?: string
+    asOf?: string
+    budget?: number
+    cwdStack?: string
+  }) => {
     const qs = new URLSearchParams({
       q: input.q,
       budget: String(input.budget ?? 1200),
     })
     if (input.scope) qs.set("scope", input.scope)
     if (input.asOf) qs.set("as_of", input.asOf)
+    if (input.cwdStack) qs.set("cwd_stack", input.cwdStack)
     return request<RecallResponse>("GET", `/v1/recall?${qs.toString()}`)
   },
   mirror: (proposal: string, scope?: string) =>

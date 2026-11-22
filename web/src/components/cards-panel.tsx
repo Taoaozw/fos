@@ -1,7 +1,9 @@
-import { useMemo, useState, type FormEvent } from "react"
+import { useEffect, useMemo, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   IconArchive,
+  IconCheck,
+  IconCopy,
   IconEdit,
   IconPin,
   IconSearch,
@@ -33,20 +35,91 @@ import {
 import { Separator } from "@/components/ui/separator"
 import { Textarea } from "@/components/ui/textarea"
 import { fosApi } from "@/lib/api"
-import type { CompiledNode, DashboardResponse } from "@/lib/types"
+import type { CardFilterPreset, CompiledNode, DashboardResponse } from "@/lib/types"
 
 interface CardsPanelProps {
   dashboard: DashboardResponse
   selectedNodeId: string | null
   onSelectNode: (id: string) => void
+  filterPreset?: CardFilterPreset | null
 }
 
-export function CardsPanel({ dashboard, selectedNodeId, onSelectNode }: CardsPanelProps) {
+function parseEvidenceRaw(raw: string): { prefix: string; lang: string; code: string; suffix: string } | null {
+  const m = raw.match(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/)
+  if (!m || m.index === undefined) return null
+  const prefix = raw.slice(0, m.index).trim()
+  const lang = m[1] || "code"
+  const code = m[2].replace(/\n$/, "")
+  const suffix = raw.slice(m.index + m[0].length).trim()
+  return { prefix, lang, code, suffix }
+}
+
+function EvidenceBlock({ raw }: { raw: string }) {
+  const [copied, setCopied] = useState(false)
+  const parsed = useMemo(() => parseEvidenceRaw(raw), [raw])
+
+  if (!parsed) {
+    return (
+      <div className="rounded-md border border-border bg-muted/30 p-2.5 font-mono text-xs whitespace-pre-wrap text-foreground">
+        {raw}
+      </div>
+    )
+  }
+
+  const copyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(parsed.code)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1600)
+    } catch {
+      toast.error("复制失败")
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      {parsed.prefix && (
+        <div className="rounded-md border border-border bg-muted/25 p-2.5 font-mono text-xs whitespace-pre-wrap text-muted-foreground">
+          {parsed.prefix}
+        </div>
+      )}
+      <div className="overflow-hidden rounded-md border border-border bg-background">
+        <div className="flex items-center justify-between border-b border-border bg-muted/40 px-2.5 py-1">
+          <Badge variant="outline" className="rounded-md font-mono text-xs">
+            {parsed.lang}
+          </Badge>
+          <Button variant="ghost" size="xs" className="font-normal text-xs" onClick={copyCode}>
+            {copied ? <IconCheck className="size-3.5" /> : <IconCopy className="size-3.5" />}
+            {copied ? "已复制" : "复制骨架"}
+          </Button>
+        </div>
+        <pre className="max-h-72 overflow-auto p-3 font-mono text-xs leading-relaxed text-foreground">
+          <code>{parsed.code}</code>
+        </pre>
+      </div>
+      {parsed.suffix && (
+        <div className="rounded-md border border-border bg-muted/25 p-2.5 font-mono text-xs whitespace-pre-wrap text-muted-foreground">
+          {parsed.suffix}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPreset }: CardsPanelProps) {
   const [search, setSearch] = useState("")
   const [scope, setScope] = useState("__all__")
   const [status, setStatus] = useState("active")
   const [severity, setSeverity] = useState("__all__")
   const [kind, setKind] = useState("__all__")
+  const [special, setSpecial] = useState<"all" | "patterns" | "issues" | "guards">("all")
+
+  useEffect(() => {
+    if (!filterPreset) return
+    if (filterPreset.scope !== undefined) setScope(filterPreset.scope)
+    if (filterPreset.special !== undefined) setSpecial(filterPreset.special)
+    setStatus("active")
+  }, [filterPreset])
 
   const [correctTarget, setCorrectTarget] = useState<CompiledNode | null>(null)
   const [correctRule, setCorrectRule] = useState("")
@@ -64,12 +137,16 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode }: CardsPan
       if (status !== "__all__" && n.status !== status) return false
       if (severity !== "__all__" && n.severity !== severity) return false
       if (kind !== "__all__" && n.type !== kind) return false
+      if (special === "patterns" && n.compat?.pattern !== "code_exemplar") return false
+      if (special === "issues" && n.freshness !== "drifted" && n.freshness !== "broken_ref") return false
+      if (special === "guards" && !n.guard_pattern) return false
       if (q) {
         const hay = [
           n.id,
           n.rule,
           n.rationale,
           n.guard_hint,
+          n.source_ref ?? "",
           ...(n.trigger_when || []),
           ...(n.entities || []),
         ]
@@ -79,7 +156,7 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode }: CardsPan
       }
       return true
     })
-  }, [dashboard.nodes, search, scope, status, severity, kind])
+  }, [dashboard.nodes, search, scope, status, severity, kind, special])
 
   const detailQuery = useQuery({
     queryKey: ["fos", "node", selectedNodeId],
@@ -204,6 +281,20 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode }: CardsPan
             <SelectItem value="outcome">outcome</SelectItem>
           </SelectContent>
         </Select>
+        <Select
+          value={special}
+          onValueChange={(v) => setSpecial((v as "all" | "patterns" | "issues" | "guards") ?? "all")}
+        >
+          <SelectTrigger size="sm" className="w-36 text-xs">
+            <SelectValue placeholder="专题" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部专题</SelectItem>
+            <SelectItem value="patterns">代码范式 Patterns</SelectItem>
+            <SelectItem value="issues">漂移·断链 Issues</SelectItem>
+            <SelectItem value="guards">静态守卫 Guards</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
 
       {/* Master-Detail Split */}
@@ -260,8 +351,21 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode }: CardsPan
                           </Badge>
                         )}
                       </div>
-                      <div className="font-mono text-xs text-muted-foreground">
-                        seen:{n.seen_count} · {(n.valid_from || "").slice(0, 10)}
+                      <div className="flex items-center gap-2 font-mono text-xs text-muted-foreground">
+                        {n.freshness && n.freshness !== "untracked" && (
+                          <span
+                            title={`freshness: ${n.freshness}`}
+                            className={`size-2 rounded-full ${
+                              n.freshness === "fresh"
+                                ? "bg-chart-2"
+                                : n.freshness === "drifted"
+                                  ? "bg-chart-3"
+                                  : "bg-chart-5"
+                            }`}
+                          />
+                        )}
+                        {(n.recall_hits ?? 0) > 0 && <span>hits:{n.recall_hits}</span>}
+                        <span>seen:{n.seen_count} · {(n.valid_from || "").slice(0, 10)}</span>
                       </div>
                     </div>
                   </CardHeader>
@@ -524,16 +628,14 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode }: CardsPan
                   <div className="text-xs font-medium text-muted-foreground">
                     L2 不可变原始证据 ({detailQuery.data?.evidence?.length ?? 0})
                   </div>
-                  <ScrollArea className="max-h-56">
+                  <ScrollArea className="max-h-96">
                     <div className="flex flex-col gap-2.5 pr-2">
                       {(detailQuery.data?.evidence ?? []).map((a) => (
-                        <div key={a.id} className="flex flex-col gap-1">
+                        <div key={a.id} className="flex flex-col gap-1.5">
                           <div className="font-mono text-xs text-muted-foreground">
                             {a.id} · {a.source} · {a.ts}
                           </div>
-                          <div className="rounded-md border border-border bg-muted/30 p-2.5 font-mono text-xs whitespace-pre-wrap text-foreground">
-                            {a.raw}
-                          </div>
+                          <EvidenceBlock raw={a.raw} />
                         </div>
                       ))}
                     </div>

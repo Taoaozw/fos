@@ -166,9 +166,22 @@ export interface BootResponse {
   }>
 }
 
+export interface CompatCheck {
+  status: "compatible" | "minor_drift" | "major_drift" | "cross_stack" | string
+  drifts?: string[]
+  note?: string
+}
+
 export interface RecallItem extends CompiledNode {
   score: number
   channels: string[]
+  compat_check?: CompatCheck
+}
+
+export interface CardFilterPreset {
+  scope?: string
+  special?: "all" | "patterns" | "issues" | "guards"
+  nonce: number
 }
 
 export interface RecallResponse {
