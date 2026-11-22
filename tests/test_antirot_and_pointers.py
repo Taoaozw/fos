@@ -65,9 +65,11 @@ def test_source_ref_drift_detection_recall_penalty_and_proposal(tmp_path: Path) 
     assert dash["hygiene"]["drifted_nodes"] == 1
     assert dash["hygiene"]["broken_ref_nodes"] == 0
 
-    # 3. Delete authoritative file -> `broken_ref` + severe recall penalty + 0-day retire_stale proposal
+    # 3. Delete authoritative file -> `broken_ref` excluded from L0 boot + recall penalty + 0-day retire_stale proposal
     design_doc.unlink()
     assert check_source_freshness(meta["source_ref"], meta["source_hash"]) == "broken_ref"
+    boot_after = engine.boot(project="demo-proj", budget=300)
+    assert all(e["id"] != node_id for e in boot_after["entries"])
     rec_broken = engine.recall("网关热路径 零数据库", scope="demo-proj")
     assert rec_broken["results"][0]["freshness"] == "broken_ref"
     assert rec_broken["results"][0]["score"] < rec_drifted["results"][0]["score"]

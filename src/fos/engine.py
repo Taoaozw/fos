@@ -172,8 +172,13 @@ def query_snapshot_boot(
     prioritizes cross-project principles & P0 redlines over single-repo items.
     """
     raw_active = db.list_nodes(scope=project, as_of=None)
-    # Exclude low-priority P2 trivia from wakeup kernel (still searchable via `fos recall`)
-    active = [n for n in raw_active if n.severity != "P2" or n.type == "principle"]
+    # Exclude low-priority P2 trivia and broken-ref deleted-doc cards from wakeup kernel
+    active = [
+        n
+        for n in raw_active
+        if (n.severity != "P2" or n.type == "principle")
+        and check_source_freshness(n.source_ref, n.source_hash) != "broken_ref"
+    ]
     if project is None:
         # Global boot: focus on global principles/decisions/lessons & P0 redlines
         global_or_p0 = [n for n in active if n.scope == "global" or n.severity == "P0" or n.type == "principle"]
