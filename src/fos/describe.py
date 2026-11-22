@@ -253,6 +253,23 @@ COMMAND_SPECS: list[dict[str, Any]] = [
             {"name": "--json", "type": "bool", "default": "false", "desc": "JSON output"},
         ],
     },
+    {
+        "name": "proposals",
+        "aliases": ["prop", "inbox"],
+        "readOnly": False,
+        "summary": "Scan, list, accept, or dismiss cross-project architectural & governance proposals",
+        "usage": "fos proposals [list|scan|accept|dismiss] [ID] [--status pending|all] [--root DIR] [--reasoner cli] [--severity P0|P1] [--reason TEXT] [--force] [--json]",
+        "flags": [
+            {"name": "--status", "type": "string", "default": "pending", "desc": "filter for list: pending|accepted|dismissed|expired|all"},
+            {"name": "--root", "type": "string", "default": "", "desc": "root directory of owned git repos for scan"},
+            {"name": "--reasoner", "type": "string", "default": "", "desc": "optional reasoner override for scan (e.g. cli)"},
+            {"name": "--severity", "type": "string", "default": "", "desc": "override severity (P0/P1) on accept"},
+            {"name": "--rule", "type": "string", "default": "", "desc": "override rule text on accept"},
+            {"name": "--reason", "type": "string", "default": "", "desc": "dismissal reason or rationale override"},
+            {"name": "--force", "type": "bool", "default": "false", "desc": "force rescan (bypass cache) or bypass L0 budget guard on accept"},
+            {"name": "--json", "type": "bool", "default": "false", "desc": "JSON output"},
+        ],
+    },
 ]
 
 

@@ -625,11 +625,17 @@ class BrainEngine:
         emb = self.providers.embedder.embed([node_embedding_text(node)])[0]
         db.upsert_node(node, embedding=emb)
 
-        # Handle explicit supersession (--supersedes DEC-xxx)
+        # Handle explicit supersession (--supersedes DEC-xxx or merge supersedes_ids=[...])
         superseded_node: CompiledNode | None = None
-        sup_id = meta.get("supersedes")
-        if sup_id:
-            old = db.get_node(str(sup_id))
+        sup_targets: list[str] = []
+        if meta.get("supersedes"):
+            sup_targets.append(str(meta["supersedes"]))
+        for sid in meta.get("supersedes_ids") or []:
+            s = str(sid)
+            if s and s not in sup_targets:
+                sup_targets.append(s)
+        for sup_id in sup_targets:
+            old = db.get_node(sup_id)
             if old is not None:
                 old.status = "superseded"
                 old.valid_until = atom.ts
@@ -645,7 +651,8 @@ class BrainEngine:
                         meta={"atom_id": atom.id},
                     )
                 )
-                superseded_node = old
+                if superseded_node is None:
+                    superseded_node = old
 
         # Optional explicit relation links from meta
         for rel_key, edge_type in (
@@ -666,6 +673,19 @@ class BrainEngine:
                             valid_from=atom.ts,
                         )
                     )
+
+        # Reverse provenance links: repo evidence nodes --SUPPORTS--> promoted global node
+        for src_id in meta.get("supported_by") or []:
+            if src_id and db.get_node(str(src_id)) is not None:
+                db.add_edge(
+                    GraphEdge(
+                        src_id=str(src_id),
+                        dst_id=node.id,
+                        edge_type="SUPPORTS",
+                        valid_from=atom.ts,
+                        meta={"atom_id": atom.id},
+                    )
+                )
 
         # Scope application edge
         if node.scope and node.scope != "global":
@@ -933,6 +953,11 @@ class BrainEngine:
         rejected_dir = self.snapshots.rejected_dir
         rejected_snaps = sorted(p.stem for p in rejected_dir.glob("v*.db")) if rejected_dir.exists() else []
 
+        # Pending proposals count (outside immutable ledger/)
+        from fos.proposals import ProposalStore
+
+        pending_proposals = sum(1 for p in ProposalStore(self.data_dir).load_all() if p.status == "pending")
+
         recent_atoms = [a.to_dict() for a in reversed(atoms[-ledger_limit:])]
         return {
             "snapshot_version": self.snapshots.current_version(),
@@ -949,6 +974,7 @@ class BrainEngine:
                 "golden_cases": len(golden),
                 "pinned_nodes": len(pinned_ids),
                 "edges": len(all_edges),
+                "pending_proposals": pending_proposals,
             },
             "distributions": {
                 "by_status": by_status,

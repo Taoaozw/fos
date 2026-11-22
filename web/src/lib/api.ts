@@ -6,6 +6,8 @@ import type {
   HealthResponse,
   MirrorResponse,
   NodeDetailResponse,
+  ProposalScanResponse,
+  ProposalsListResponse,
   RecallResponse,
 } from "./types"
 
@@ -126,4 +128,37 @@ export const fosApi = {
     request<DreamResponse>("POST", "/v1/dream", { dry_run: dryRun, no_gate: false }),
   undo: () =>
     request<{ previous: string; current: string }>("POST", "/v1/undo"),
+  listProposals: (status = "pending") =>
+    request<ProposalsListResponse>(
+      "GET",
+      `/v1/proposals?status=${encodeURIComponent(status)}`
+    ),
+  scanProposals: (input?: { reasoner?: string; force?: boolean; rootDir?: string }) =>
+    request<ProposalScanResponse>("POST", "/v1/proposals/scan", {
+      root_dir: input?.rootDir || null,
+      reasoner: input?.reasoner || null,
+      force: Boolean(input?.force),
+    }),
+  acceptProposal: (
+    id: string,
+    input?: {
+      rule?: string
+      rationale?: string
+      guard_hint?: string
+      severity?: string
+      trigger_when?: string[]
+      force?: boolean
+    }
+  ) =>
+    request<{ result_node_id: string | null }>(
+      "POST",
+      `/v1/proposals/${encodeURIComponent(id)}/accept`,
+      input ?? {}
+    ),
+  dismissProposal: (id: string, reason = "") =>
+    request<{ proposal: { id: string } }>(
+      "POST",
+      `/v1/proposals/${encodeURIComponent(id)}/dismiss`,
+      { reason }
+    ),
 }

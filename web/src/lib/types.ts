@@ -71,6 +71,7 @@ export interface DashboardResponse {
     golden_cases: number
     pinned_nodes: number
     edges: number
+    pending_proposals?: number
   }
   distributions: {
     by_status: Record<string, number>
@@ -173,4 +174,76 @@ export interface DreamResponse {
   candidate_version?: string
   stats: Record<string, unknown>
   gate?: EvalResponse
+}
+
+export type ProposalKind = "promote_global" | "merge_dedup" | "retire_stale"
+export type ProposalStatus = "pending" | "accepted" | "dismissed" | "expired"
+
+export interface ProposalEvidenceNode {
+  id: string
+  scope: string
+  type: string
+  severity: string
+  rule: string
+}
+
+export interface ProposalEvidenceManifest {
+  repo: string
+  stack_tags: string[]
+}
+
+export interface Proposal {
+  id: string
+  kind: ProposalKind | string
+  status: ProposalStatus | string
+  fingerprint: string
+  title: string
+  proposed_type: string
+  proposed_scope: string
+  proposed_severity: Severity | string
+  proposed_rule: string
+  proposed_rationale: string
+  proposed_guard_hint: string
+  proposed_trigger_when: string[]
+  evidence_repos: string[]
+  evidence_nodes: ProposalEvidenceNode[]
+  evidence_manifests: ProposalEvidenceManifest[]
+  target_node_ids: string[]
+  estimated_l0_delta: number
+  confidence: number
+  created_at: string
+  updated_at: string
+  resolved_at: string | null
+  result_node_id: string | null
+  dismiss_reason: string
+}
+
+export interface ProposalsListResponse {
+  status_filter: string
+  counts: Record<string, number>
+  l0_budget: {
+    used_tokens: number
+    limit_tokens: number
+    remaining_tokens: number
+  }
+  proposals: Proposal[]
+}
+
+export interface ProposalScanResponse {
+  owned_repos: string[]
+  recurring_stack_tags: Record<string, string[]>
+  cross_repo_clusters: number
+  global_overlap_clusters: number
+  reasoner: string
+  cache_hit: boolean
+  expired: number
+  created: number
+  skipped_existing: number
+  skipped_cooldown: number
+  pending_count: number
+  l0_budget: {
+    used_tokens: number
+    limit_tokens: number
+    remaining_tokens: number
+  }
 }

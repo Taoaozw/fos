@@ -21,6 +21,14 @@ from fos.dream import run_dream
 from fos.engine import BrainEngine
 from fos.errors import FosError, GateFailedError, NotFoundError, UsageError
 from fos.eval_gate import pin_node_in_engine, run_eval_on_engine
+from fos.proposals import (
+    ProposalStateError,
+    accept_proposal,
+    dismiss_proposal,
+    list_proposals,
+    scan_proposals,
+)
+from fos.providers import CLISubprocessReasoner
 from fos.update import find_published_wheel
 
 _HOST_RE = re.compile(r"^[A-Za-z0-9.:\[\]-]+$")
@@ -67,14 +75,43 @@ class ArchiveRequest(BaseModel):
     device: str | None = None
 
 
+class ProposalScanRequest(BaseModel):
+    root_dir: str | None = None
+    reasoner: str | None = None
+    force: bool = False
+
+
+class ProposalAcceptRequest(BaseModel):
+    rule: str | None = None
+    rationale: str | None = None
+    guard_hint: str | None = None
+    severity: str | None = None
+    trigger_when: list[str] | None = None
+    force: bool = False
+    device: str | None = None
+
+
+class ProposalDismissRequest(BaseModel):
+    reason: str = ""
+
+
 def _http_from_fos_error(exc: FosError) -> HTTPException:
-    detail = {"error": str(exc), "code": int(exc.exit_code), "hint": exc.hint, "details": exc.details}
+    detail = {
+        "error": str(exc),
+        "code": int(exc.exit_code),
+        "error_code": exc.error_code,
+        "hint": exc.hint,
+        "details": exc.details,
+    }
     if isinstance(exc, UsageError):
         return HTTPException(status_code=400, detail=detail)
     if isinstance(exc, NotFoundError):
         return HTTPException(status_code=404, detail=detail)
     if isinstance(exc, GateFailedError):
         return HTTPException(status_code=422, detail=detail)
+    if isinstance(exc, ProposalStateError):
+        status = 422 if exc.error_code == "L0_BUDGET_EXCEEDED" else 409
+        return HTTPException(status_code=status, detail=detail)
     return HTTPException(status_code=500, detail=detail)
 
 
@@ -359,6 +396,50 @@ def create_app(
     def rebuild() -> dict[str, Any]:
         try:
             return brain.rebuild_from_ledger()
+        except FosError as exc:
+            raise _http_from_fos_error(exc) from exc
+
+    # --- Proposal Governance Inbox ---
+
+    @app.get("/v1/proposals", dependencies=[Depends(require_auth)])
+    def proposals_list(status: str = Query(default="pending")) -> dict[str, Any]:
+        try:
+            return list_proposals(brain, status=status)
+        except FosError as exc:
+            raise _http_from_fos_error(exc) from exc
+
+    @app.post("/v1/proposals/scan", dependencies=[Depends(require_auth)])
+    def proposals_scan(req: ProposalScanRequest) -> dict[str, Any]:
+        try:
+            rdir = Path(req.root_dir).expanduser().resolve() if req.root_dir else None
+            rsn = None
+            if req.reasoner == "cli":
+                rsn = CLISubprocessReasoner(cfg.providers.cli_command)
+            return scan_proposals(brain, root_dir=rdir, reasoner=rsn, force=req.force)
+        except FosError as exc:
+            raise _http_from_fos_error(exc) from exc
+
+    @app.post("/v1/proposals/{proposal_id}/accept", dependencies=[Depends(require_auth)])
+    def proposals_accept(proposal_id: str, req: ProposalAcceptRequest) -> dict[str, Any]:
+        try:
+            return accept_proposal(
+                brain,
+                proposal_id,
+                rule=req.rule,
+                rationale=req.rationale,
+                guard_hint=req.guard_hint,
+                severity=req.severity,
+                trigger_when=req.trigger_when,
+                force=req.force,
+                device=req.device,
+            )
+        except FosError as exc:
+            raise _http_from_fos_error(exc) from exc
+
+    @app.post("/v1/proposals/{proposal_id}/dismiss", dependencies=[Depends(require_auth)])
+    def proposals_dismiss(proposal_id: str, req: ProposalDismissRequest) -> dict[str, Any]:
+        try:
+            return dismiss_proposal(brain, proposal_id, reason=req.reason)
         except FosError as exc:
             raise _http_from_fos_error(exc) from exc
 

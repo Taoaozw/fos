@@ -568,21 +568,28 @@ def _compile_dream_nodes(
         nodes_by_id[node_id] = node
         node_order.append(node_id)
 
-        sup_id = meta.get("supersedes")
-        if sup_id and str(sup_id) in nodes_by_id:
-            old = nodes_by_id[str(sup_id)]
-            old.status = "superseded"
-            old.valid_until = atom.ts
-            old.superseded_by = node.id
-            edges.append(
-                GraphEdge(
-                    src_id=node.id,
-                    dst_id=old.id,
-                    edge_type="SUPERSEDES",
-                    valid_from=atom.ts,
-                    meta={"atom_id": atom.id},
+        sup_targets: list[str] = []
+        if meta.get("supersedes"):
+            sup_targets.append(str(meta["supersedes"]))
+        for sid in meta.get("supersedes_ids") or []:
+            s = str(sid)
+            if s and s not in sup_targets:
+                sup_targets.append(s)
+        for sup_id in sup_targets:
+            if sup_id in nodes_by_id:
+                old = nodes_by_id[sup_id]
+                old.status = "superseded"
+                old.valid_until = atom.ts
+                old.superseded_by = node.id
+                edges.append(
+                    GraphEdge(
+                        src_id=node.id,
+                        dst_id=old.id,
+                        edge_type="SUPERSEDES",
+                        valid_from=atom.ts,
+                        meta={"atom_id": atom.id},
+                    )
                 )
-            )
 
         for rel_key, edge_type in (
             ("caused_by", "CAUSED_BY"),
@@ -602,6 +609,18 @@ def _compile_dream_nodes(
                             valid_from=atom.ts,
                         )
                     )
+
+        for src_id in meta.get("supported_by") or []:
+            if src_id and str(src_id) in nodes_by_id:
+                edges.append(
+                    GraphEdge(
+                        src_id=str(src_id),
+                        dst_id=node.id,
+                        edge_type="SUPPORTS",
+                        valid_from=atom.ts,
+                        meta={"atom_id": atom.id},
+                    )
+                )
 
         if node.scope and node.scope != "global":
             edges.append(

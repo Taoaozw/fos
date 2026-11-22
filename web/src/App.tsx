@@ -15,6 +15,7 @@ import { CardsPanel } from "@/components/cards-panel"
 import { GraphPanel } from "@/components/graph-panel"
 import { OverviewPanel } from "@/components/overview-panel"
 import { PlaygroundPanel } from "@/components/playground-panel"
+import { ProposalsPanel } from "@/components/proposals-panel"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -196,6 +197,9 @@ export function App() {
           <Tabs value={activeTab} onValueChange={(v) => setActiveTab(String(v))}>
             <TabsList className="mb-4">
               <TabsTrigger value="overview">总览 Overview</TabsTrigger>
+              <TabsTrigger value="proposals">
+                推荐 Inbox ({dashboardQuery.data.counts.pending_proposals ?? 0})
+              </TabsTrigger>
               <TabsTrigger value="cards">
                 知识卡片 Cards ({dashboardQuery.data.counts.active_nodes})
               </TabsTrigger>
@@ -208,6 +212,10 @@ export function App() {
 
             <TabsContent value="overview">
               <OverviewPanel dashboard={dashboardQuery.data} />
+            </TabsContent>
+
+            <TabsContent value="proposals">
+              <ProposalsPanel onJumpToCard={handleJumpToCard} />
             </TabsContent>
 
             <TabsContent value="cards">

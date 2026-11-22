@@ -114,6 +114,24 @@ def _print_result(data: Any, *, as_json: bool, command: str, fields: str | None 
             print(dumps_json(data, pretty=True))
         return
 
+    if command == "proposals" and "proposals" in data:
+        budget = data.get("l0_budget") or {}
+        counts = data.get("counts") or {}
+        print(
+            f"Proposals (pending={counts.get('pending', 0)}, accepted={counts.get('accepted', 0)}, "
+            f"dismissed={counts.get('dismissed', 0)} | L0={budget.get('used_tokens', 0)}/{budget.get('limit_tokens', 300)}t)"
+        )
+        for p in data.get("proposals") or []:
+            repos = ",".join(p.get("evidence_repos") or [])
+            delta = p.get("estimated_l0_delta", 0)
+            delta_s = f"+{delta}t" if delta > 0 else f"{delta}t"
+            print(
+                f"  - [{p['id']}|{p['kind']}|{p['proposed_severity']}|L0:{delta_s}] {p.get('title', '')}"
+                + (f" ({repos})" if repos else "")
+            )
+            print(f"      {p.get('proposed_rule', '')}")
+        return
+
     if command == "update":
         if data.get("updated"):
             print(f"fos updated: {data.get('local_version')} -> {data.get('remote_version')}")
@@ -274,6 +292,20 @@ def build_parser() -> _StrictArgumentParser:
     p_open.add_argument("--print", dest="print_only", action="store_true", help="Print URL without opening browser")
     p_open.add_argument("--port", type=int, default=7622, help="Local fosd port when in local mode")
     p_open.add_argument("--json", action="store_true")
+
+    # proposals
+    p_prop = sub.add_parser("proposals", aliases=["prop", "inbox"], help="Scan, list, accept, or dismiss cross-project governance proposals")
+    p_prop.add_argument("action", nargs="?", default="list", choices=["list", "scan", "accept", "dismiss"])
+    p_prop.add_argument("proposal_id", nargs="?", default=None, help="Proposal ID (prp_...) for accept/dismiss")
+    p_prop.add_argument("--status", default="pending", choices=["pending", "accepted", "dismissed", "expired", "all"])
+    p_prop.add_argument("--root", type=str, default=None, help="Owned git repos root dir for scan")
+    p_prop.add_argument("--reasoner", type=str, default=None, choices=["heuristic", "cli"], help="Reasoner override for scan")
+    p_prop.add_argument("--cli-cmd", type=str, default=None, help="CLI reasoner command override")
+    p_prop.add_argument("--severity", type=str, default=None, choices=["P0", "P1", "P2"], help="Severity override on accept")
+    p_prop.add_argument("--rule", type=str, default=None, help="Rule override on accept")
+    p_prop.add_argument("--reason", type=str, default="", help="Dismiss reason or rationale override")
+    p_prop.add_argument("--force", action="store_true", help="Bypass scan cache or L0 budget guard")
+    p_prop.add_argument("--json", action="store_true")
 
     return parser
 
@@ -451,6 +483,33 @@ def run_cli(argv: list[str] | None = None) -> int:
             if not as_json:
                 print(url)
                 return int(ExitCode.OK)
+        elif cmd == "proposals":
+            if args.action == "list":
+                result = client.list_proposals(status=args.status)
+            elif args.action == "scan":
+                rdir = Path(args.root).expanduser().resolve() if args.root else None
+                result = client.scan_proposals(
+                    root_dir=rdir,
+                    reasoner=args.reasoner,
+                    cli_command=args.cli_cmd,
+                    force=args.force,
+                )
+            elif args.action == "accept":
+                if not args.proposal_id:
+                    raise UsageError("Usage: fos proposals accept <proposal_id> [--severity P0|P1] [--rule TEXT]")
+                result = client.accept_proposal(
+                    args.proposal_id,
+                    rule=args.rule,
+                    rationale=args.reason or None,
+                    severity=args.severity,
+                    force=args.force,
+                )
+            elif args.action == "dismiss":
+                if not args.proposal_id:
+                    raise UsageError("Usage: fos proposals dismiss <proposal_id> [--reason TEXT]")
+                result = client.dismiss_proposal(args.proposal_id, reason=args.reason)
+            else:
+                raise UsageError(f"Unknown proposals action: {args.action}")
         else:
             raise UsageError(f"Unknown command: {cmd}")
 

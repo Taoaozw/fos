@@ -649,3 +649,84 @@ class FosClient:
             http_transport=self.http_transport,
             installer_fn=installer_fn,
         )
+
+    def list_proposals(self, *, status: str = "pending") -> dict[str, Any]:
+        if not self.is_remote:
+            from fos.proposals import list_proposals
+
+            return list_proposals(self._engine(), status=status)
+        return self._request("GET", "/v1/proposals", params={"status": status})
+
+    def scan_proposals(
+        self,
+        *,
+        root_dir: Path | None = None,
+        reasoner: str | None = None,
+        cli_command: str | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        if not self.is_remote:
+            from fos.proposals import scan_proposals
+            from fos.providers import CLISubprocessReasoner
+
+            rsn = None
+            if reasoner == "cli":
+                rsn = CLISubprocessReasoner(cli_command or self.cfg.providers.cli_command)
+            return scan_proposals(self._engine(), root_dir=root_dir, reasoner=rsn, force=force)
+        return self._request(
+            "POST",
+            "/v1/proposals/scan",
+            json_body={
+                "root_dir": str(root_dir) if root_dir else None,
+                "reasoner": reasoner,
+                "force": force,
+            },
+            timeout=120.0,
+        )
+
+    def accept_proposal(
+        self,
+        proposal_id: str,
+        *,
+        rule: str | None = None,
+        rationale: str | None = None,
+        guard_hint: str | None = None,
+        severity: str | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        if not self.is_remote:
+            from fos.proposals import accept_proposal
+
+            return accept_proposal(
+                self._engine(),
+                proposal_id,
+                rule=rule,
+                rationale=rationale,
+                guard_hint=guard_hint,
+                severity=severity,
+                force=force,
+                device=self.cfg.device,
+            )
+        return self._request(
+            "POST",
+            f"/v1/proposals/{proposal_id}/accept",
+            json_body={
+                "rule": rule,
+                "rationale": rationale,
+                "guard_hint": guard_hint,
+                "severity": severity,
+                "force": force,
+                "device": self.cfg.device,
+            },
+        )
+
+    def dismiss_proposal(self, proposal_id: str, *, reason: str = "") -> dict[str, Any]:
+        if not self.is_remote:
+            from fos.proposals import dismiss_proposal
+
+            return dismiss_proposal(self._engine(), proposal_id, reason=reason)
+        return self._request(
+            "POST",
+            f"/v1/proposals/{proposal_id}/dismiss",
+            json_body={"reason": reason},
+        )

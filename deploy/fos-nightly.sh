@@ -24,6 +24,13 @@ if ! fos dream --reasoner cli --json; then
   echo "[warn] LLM dream did not promote (gate blocked or CLI unavailable); keeping current snapshot untouched." >&2
 fi
 
+# Refresh cross-project architectural & L0 governance Proposal Inbox (human reviews in Web UI / CLI)
+if [ -d "$GIT_ROOT" ]; then
+  fos proposals scan --root "$GIT_ROOT" --reasoner cli --json || true
+else
+  fos proposals scan --reasoner cli --json || true
+fi
+
 if [ -x "$SCRIPT_DIR/fos-backup.sh" ]; then
   "$SCRIPT_DIR/fos-backup.sh" || true
 fi
