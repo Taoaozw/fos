@@ -311,10 +311,12 @@ class FosClient:
         budget: int = 1200,
         limit: int = 20,
         cwd_stack: dict[str, str] | None = None,
+        exclude_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         from fos.code_pattern import format_stack_param
 
         stack_param = format_stack_param(cwd_stack)
+        excl_param = ",".join(x.strip() for x in (exclude_ids or []) if x.strip()) or None
         if not self.is_remote:
             warm = self._try_local_daemon(
                 "GET",
@@ -327,6 +329,7 @@ class FosClient:
                     "budget": budget,
                     "limit": limit,
                     "cwd_stack": stack_param,
+                    "exclude": excl_param,
                 },
             )
             if warm is not None:
@@ -339,6 +342,7 @@ class FosClient:
                 budget=budget,
                 limit=limit,
                 cwd_stack=cwd_stack,
+                exclude_ids=exclude_ids,
             )
         try:
             return self._request(
@@ -352,6 +356,7 @@ class FosClient:
                     "budget": budget,
                     "limit": limit,
                     "cwd_stack": stack_param,
+                    "exclude": excl_param,
                 },
             )
         except OfflineError:
@@ -368,6 +373,7 @@ class FosClient:
                     limit=limit,
                     mode="offline_cache",
                     cwd_stack=cwd_stack,
+                    exclude_ids=exclude_ids,
                 )
 
     def get(self, node_id: str, *, tier: str = "L1", include_graph: bool = False) -> dict[str, Any]:

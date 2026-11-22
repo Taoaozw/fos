@@ -5,20 +5,69 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 from fos.errors import ExitCode, FosError
+
+_AGENT_ENV_KEYS: tuple[str, ...] = (
+    "ANTIGRAVITY_AGENT",
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CODEX_SANDBOX",
+    "CODEX_CI",
+    "CODEX_THREAD_ID",
+    "CURSOR_AGENT",
+    "CURSOR_TRACE_ID",
+    "AIDER_MODEL",
+    "PI_CODING_AGENT",
+    "CI",
+)
+
+
+def is_agent_env() -> bool:
+    """Return True when invoked inside an AI coding agent shell/PTY harness or CI."""
+    return any(bool(os.environ.get(k)) for k in _AGENT_ENV_KEYS)
 
 
 def is_stdout_tty() -> bool:
     if os.environ.get("FOS_PRETTY_JSON") == "1":
         return True
-    if os.environ.get("FOS_COMPACT_JSON") == "1":
+    if os.environ.get("FOS_COMPACT_JSON") == "1" or is_agent_env():
         return False
     try:
         return sys.stdout.isatty()
     except Exception:
         return False
+
+
+def compact_source_ref(source_ref: str, *, cwd: Path | None = None) -> str:
+    """Shorten absolute `source_ref` for human/LLM text display without mutating stored paths."""
+    ref = (source_ref or "").strip()
+    if not ref or ref.startswith(("git:", "http://", "https://", "ledger:")):
+        return ref
+    sep = "::" if "::" in ref else ("#" if "#" in ref else "")
+    path_part, _, anchor = ref.partition(sep) if sep else (ref, "", "")
+    p = Path(path_part)
+    if not p.is_absolute():
+        return ref
+    base = (cwd or Path.cwd()).resolve()
+    # Find enclosing git repo root if inside one
+    repo_root = base
+    for cand in (base, *base.parents):
+        if (cand / ".git").exists():
+            repo_root = cand
+            break
+    resolved = p.resolve()
+    try:
+        rel = str(resolved.relative_to(repo_root))
+    except ValueError:
+        home = Path.home().resolve()
+        try:
+            rel = "~/" + str(resolved.relative_to(home))
+        except ValueError:
+            rel = str(p)
+    return f"{rel}{sep}{anchor}" if (sep and anchor) else rel
 
 
 def dumps_json(data: Any, *, pretty: bool | None = None) -> str:

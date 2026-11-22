@@ -30,6 +30,7 @@ if str(SRC_DIR) not in sys.path:
 
 from fos.engine import BrainEngine  # noqa: E402
 from fos.freshness import compute_doc_digest  # noqa: E402
+from fos.output import compact_source_ref  # noqa: E402
 from fos.tokens import estimate_tokens  # noqa: E402
 
 
@@ -103,27 +104,39 @@ def _run_codex(prompt: str, *, env_overrides: dict[str, str], timeout_s: int = 9
 
 def _format_fos_context(engine: BrainEngine, *, scope: str | None, recall_query: str) -> tuple[str, int, list[str]]:
     boot = engine.boot(project=scope, budget=300)
-    rec = engine.recall(recall_query, scope=scope, budget=900, limit=8)
+    # Only skip L1 re-emission for L0 entries whose full rule already fit verbatim (no '…' truncation) and have no source_ref pointer needed
+    complete_boot_ids = [
+        str(e["id"])
+        for e in (boot.get("entries") or [])
+        if e.get("id") and "…" not in str(e.get("l0", ""))
+    ]
+    # Keep complete_boot_ids only when they don't hide a source_ref pointer
+    exclude_for_recall: list[str] = []
+    if complete_boot_ids:
+        with engine.snapshots.open_current(read_only=True) as db:
+            for bid in complete_boot_ids:
+                bn = db.get_node(bid)
+                if bn is not None and not bn.source_ref and estimate_tokens(bn.rule) <= 28:
+                    exclude_for_recall.append(bid)
+
+    rec = engine.recall(recall_query, scope=scope, budget=900, limit=8, exclude_ids=exclude_for_recall or None)
     recalled_ids = [str(item["id"]) for item in (rec.get("results") or []) if item.get("id")]
 
     lines = [
-        "以下是来自个人认知记忆引擎 FlowOS (`fos`) 的已沉淀规则与上下文（权威参考；若标记 `freshness=broken_ref` 表示其源文件已被删除、规则已失效，请勿盲从）：",
-        "",
-        "### L0 Wakeup Kernel",
+        "以下是 FlowOS (`fos`) 已沉淀规则与上下文（权威参考；若标记 `broken_ref` 表示源文件已删除、规则已失效，请勿盲从）：",
         boot.get("kernel_text", "").strip(),
-        "",
-        f"### L1 Recalled Memory (scope={scope or 'global'}, hits={rec.get('count', 0)})",
     ]
-    for item in rec.get("results") or []:
-        fresh = item.get("freshness", "")
-        fresh_tag = f"|fresh={fresh}" if fresh else ""
-        lines.append(
-            f"- [{item['id']}|{item['scope']}|{item['severity']}{fresh_tag}] {item['rule']}"
-        )
-        if item.get("guard_hint"):
-            lines.append(f"  守卫: {item['guard_hint']}")
-        if item.get("source_ref"):
-            lines.append(f"  权威源文件: {item['source_ref']}")
+    hits = rec.get("results") or []
+    if hits:
+        lines.append(f"# FOS L1 (scope={scope or 'global'}, {len(hits)} hits)")
+        for item in hits:
+            fresh = item.get("freshness", "")
+            fresh_tag = f"|{fresh}" if fresh in ("drifted", "broken_ref") else ""
+            sc = item.get("scope", "")
+            sc_tag = f"|{sc}" if (sc and sc != (scope or "global") and not (sc == "global" and item.get("type") == "principle")) else ""
+            lines.append(f"[{item['id']}|{item['severity']}{sc_tag}{fresh_tag}] {item['rule']}")
+            if item.get("source_ref"):
+                lines.append(f"  ref: {compact_source_ref(item['source_ref'])}")
     block = "\n".join(lines).strip()
     return block, estimate_tokens(block), recalled_ids
 

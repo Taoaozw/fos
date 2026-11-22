@@ -10,7 +10,7 @@ from typing import Any
 
 from fos import __version__
 from fos.errors import ExitCode, FosError, GateFailedError, UsageError
-from fos.output import dumps_json, write_error, write_json
+from fos.output import compact_source_ref, dumps_json, write_error, write_json
 
 
 class _StrictArgumentParser(argparse.ArgumentParser):
@@ -45,10 +45,6 @@ def _print_result(data: Any, *, as_json: bool, command: str, fields: str | None 
 
     if command == "boot":
         print(data.get("kernel_text", ""))
-        print(
-            f"\n[{data.get('mode', 'online')}] {data.get('count', 0)} entries, "
-            f"{data.get('used_tokens', 0)}/{data.get('budget_tokens', 300)} tokens"
-        )
         return
 
     if command == "boot_hook":
@@ -58,41 +54,50 @@ def _print_result(data: Any, *, as_json: bool, command: str, fields: str | None 
         return
 
     if command == "recall":
-        print(
-            f"Recall ({data.get('mode', 'online')}, snap={data.get('snapshot_version')}, "
-            f"tokens={data.get('used_tokens')}/{data.get('budget_tokens')}): {data.get('count', 0)} hits"
-        )
-        for item in data.get("results") or []:
-            print(
-                f"  - [{item['id']}|{item['severity']}|seen:{item['seen_count']}|{item['type']}|{item['scope']}] "
-                f"{item['rule']} (score={item.get('score')})"
-            )
+        req_scope = data.get("scope") or "all"
+        hits = data.get("results") or []
+        print(f"# FOS L1 (scope={req_scope}, {len(hits)} hits, {data.get('snapshot_version')})")
+        for item in hits:
+            seen = int(item.get("seen_count", 1))
+            seen_s = f"|{seen}x" if seen > 1 else ""
+            sc = item.get("scope", "")
+            scope_s = f"|{sc}" if (sc and sc != req_scope and not (sc == "global" and item.get("type") == "principle")) else ""
+            fresh = item.get("freshness", "")
+            fresh_s = f"|{fresh}" if fresh in ("drifted", "broken_ref") else ""
+            print(f"[{item['id']}|{item['severity']}{seen_s}{scope_s}{fresh_s}] {item['rule']}")
+            meta_parts: list[str] = []
             if item.get("rationale"):
-                print(f"      rationale: {item['rationale']}")
+                meta_parts.append(f"why: {item['rationale']}")
             if item.get("source_ref"):
-                fresh_s = f" [{item['freshness']}]" if item.get("freshness") else ""
-                print(f"      source: {item['source_ref']}{fresh_s}")
+                meta_parts.append(f"ref: {compact_source_ref(item['source_ref'])}")
+            if meta_parts:
+                print("  " + " | ".join(meta_parts))
             cc = item.get("compat_check")
             if isinstance(cc, dict) and cc.get("status") == "major_drift":
                 drifts = ", ".join(cc.get("drifts") or [])
-                print(f"      ⚠ compat major_drift ({drifts}): {cc.get('note', '')}")
+                print(f"  ⚠ compat major_drift ({drifts}): {cc.get('note', '')}")
         return
 
     if command == "mirror":
-        print(f"Mirror ({data.get('mode', 'online')}, snap={data.get('snapshot_version')})")
-        for section, label in (
+        sections = (
             ("conflicts", "Conflicts"),
-            ("lesson_warnings", "Lesson Warnings"),
-            ("prior_decisions", "Prior Decisions"),
-            ("blind_spots", "Blind Spots"),
-        ):
-            items = data.get(section) or []
-            print(f"  {label} ({len(items)}):")
+            ("lesson_warnings", "Warnings"),
+            ("prior_decisions", "Prior"),
+            ("blind_spots", "BlindSpots"),
+        )
+        non_empty = [(sec, lbl, data.get(sec) or []) for sec, lbl in sections if data.get(sec)]
+        if not non_empty:
+            print(f"# FOS Mirror ({data.get('snapshot_version')}): OK (0 conflicts, 0 warnings)")
+            return
+        print(f"# FOS Mirror ({data.get('snapshot_version')})")
+        for _sec, label, items in non_empty:
+            print(f"{label} ({len(items)}):")
             for it in items:
                 if "id" in it:
-                    print(f"    - [{it['id']}] {it.get('rule', '')}")
+                    sup = f" -> superseded_by:{it['superseded_by']}" if it.get("superseded_by") else ""
+                    print(f"  [{it['id']}{sup}] {it.get('rule', '')}")
                 else:
-                    print(f"    - [{it.get('kind', 'note')}] {it.get('detail', '')}")
+                    print(f"  [{it.get('kind', 'note')}] {it.get('detail', '')}")
         return
 
     if command == "status":
@@ -208,6 +213,7 @@ def build_parser() -> _StrictArgumentParser:
     p_recall.add_argument("--as-of", dest="as_of", type=str, default=None)
     p_recall.add_argument("--budget", type=int, default=1200)
     p_recall.add_argument("--limit", type=int, default=20)
+    p_recall.add_argument("--exclude", type=str, default=None, help="Comma-separated node IDs to omit (e.g. already in L0)")
     p_recall.add_argument("--fields", type=str, default=None, help="Comma-separated JSON fields (implies --json)")
     p_recall.add_argument("--json", action="store_true")
 
@@ -481,6 +487,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             from fos.code_pattern import detect_repo_stack_versions
 
             cwd_stack, _ = detect_repo_stack_versions(Path.cwd())
+            excl = [x.strip() for x in args.exclude.split(",") if x.strip()] if args.exclude else None
             result = client.recall(
                 args.query,
                 kind=args.kind,
@@ -489,6 +496,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 budget=args.budget,
                 limit=args.limit,
                 cwd_stack=cwd_stack or None,
+                exclude_ids=excl,
             )
         elif cmd == "get":
             result = client.get(args.node_id, tier=args.tier, include_graph=args.graph)

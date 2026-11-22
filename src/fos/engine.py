@@ -40,6 +40,7 @@ from fos.store import SnapshotDB, SnapshotManager
 from fos.tokens import (
     estimate_json_tokens,
     estimate_tokens,
+    extract_stemmed_terms,
     extract_terms,
     truncate_to_tokens,
 )
@@ -56,8 +57,22 @@ _ASSUMPTION_CUES = (
     "assume", "assuming", "probably", "should work", "expect", "guess", "default", "simply",
 )
 _NEGATION_WORDS = (
-    "禁止", "不要", "不能", "不支持", "严禁", "避免", "放弃", "废弃", "替代", "改用",
-    "never", "avoid", "disable", "deprecated", "replace", "instead of", "do not", "don't",
+    "禁止", "不要", "不能", "不支持", "严禁", "避免", "放弃", "废弃", "替代", "改用", "不得", "不可", "切勿",
+    "never", "avoid", "disable", "deprecated", "replace", "instead of", "do not", "don't", "must not", "forbid",
+)
+_ACTION_CLAUSE_RE = re.compile(
+    r"(?:禁止|严禁|不得|不要|不可|切勿|避免|必须|务必|统一|改用|采用|优先|保留|\b(?:never|must|avoid|always|prefer|use)\b)",
+    re.IGNORECASE,
+)
+_DOC_PREFIX_RE = re.compile(
+    r"^(?:(?:按|根据|参见|详见|遵循)\s*[A-Za-z0-9_./-]+\.md\s*[，,：:\s]*|遵守仓库红线[：:\s]*)",
+    re.IGNORECASE,
+)
+_DOC_SUFFIX_RE = re.compile(r"[；;。,\s]*(?:详见|参见)\s*[^。；;\n]+[。.]?\s*$")
+_AMBIENT_DOC_NAMES = ("agents.md", "claude.md", "gemini.md")
+_CURRENT_STATE_RE = re.compile(
+    r"(?:\b(?:currently|current|now|recent|recently|latest|still|anymore|today)\b|现在|目前|当前|最新|最近)",
+    re.IGNORECASE,
 )
 
 
@@ -76,14 +91,38 @@ def extract_entities(text: str, extra: list[str] | None = None) -> list[str]:
     return found
 
 
+def _condense_l0_summary(rule: str, max_tokens: int = 26) -> str:
+    """Extract salient imperative/prohibition summary without mid-clause cliffhangers."""
+    cleaned = rule.replace("\n", " ").strip()
+    cleaned = _DOC_PREFIX_RE.sub("", cleaned)
+    cleaned = _DOC_SUFFIX_RE.sub("", cleaned).strip(" 。；;，,")
+    if not cleaned:
+        cleaned = rule.replace("\n", " ").strip()
+    if estimate_tokens(cleaned) <= max_tokens:
+        return cleaned
+
+    # Split into clauses; if leading setup clause lacks actionable polarity while next clause has it, preserve action!
+    clauses = [c.strip() for c in re.split(r"[；;。]|(?<=[^A-Za-z0-9])[，,]", cleaned) if c.strip()]
+    if len(clauses) >= 2 and not _ACTION_CLAUSE_RE.search(clauses[0]):
+        for sub in clauses[1:]:
+            if _ACTION_CLAUSE_RE.search(sub):
+                if estimate_tokens(clauses[0]) <= 11:
+                    merged = f"{clauses[0]}：{sub}"
+                else:
+                    merged = sub
+                return truncate_to_tokens(merged, max_tokens)
+    return truncate_to_tokens(cleaned, max_tokens)
+
+
 def build_l0_line(node: CompiledNode) -> str:
-    """Build ultra-compact L0 wakeup kernel line (~15-25 tokens)."""
-    summary = truncate_to_tokens(node.rule.replace("\n", " ").strip(), 22)
-    return f"[{node.id}|{node.severity}|seen:{node.seen_count}] {summary}"
+    """Build ultra-compact L0 wakeup kernel line (~15-26 tokens, zero default noise)."""
+    summary = _condense_l0_summary(node.rule, 26)
+    seen_tag = f"|{node.seen_count}x" if node.seen_count > 1 else ""
+    return f"[{node.id}|{node.severity}{seen_tag}] {summary}"
 
 
 def split_rule_and_rationale(raw: str) -> tuple[str, str]:
-    """Split a raw statement into a crisp rule/claim and rationale if separable."""
+    """Split a raw statement into a crisp rule/claim and rationale without dropping trailing context."""
     # For hindsight-collected episodes ("Context: ...\nHindsight: ...\nResolution: ...")
     if "Hindsight:" in raw:
         before, after = raw.split("Hindsight:", 1)
@@ -93,7 +132,7 @@ def split_rule_and_rationale(raw: str) -> tuple[str, str]:
             hind = " ".join(line.strip() for line in hind_part.strip().splitlines() if line.strip())
             res = " ".join(line.strip() for line in res_part.strip().splitlines() if line.strip())
             if res and hind:
-                return truncate_to_tokens(f"{hind} -> {res}", 96), truncate_to_tokens(ctx, 50)
+                return truncate_to_tokens(f"{hind} -> {res}", 94), truncate_to_tokens(ctx, 50)
         hind = " ".join(line.strip() for line in after.strip().splitlines() if line.strip())
         if hind:
             return truncate_to_tokens(hind, 90), truncate_to_tokens(ctx, 60)
@@ -102,10 +141,25 @@ def split_rule_and_rationale(raw: str) -> tuple[str, str]:
     for sep in ("因为", "原因:", "原因：", "because ", "rationale:", "理由:", "理由："):
         idx = clean.lower().find(sep.lower())
         if idx > 8:
-            rule = clean[:idx].strip(" ,;，；。")
-            rationale = clean[idx:].strip()
+            rule = truncate_to_tokens(clean[:idx].strip(" ,;，；。"), 92)
+            rationale = truncate_to_tokens(clean[idx:].strip(), 85)
             return rule, rationale
-    return truncate_to_tokens(clean, 80), ""
+
+    if estimate_tokens(clean) <= 84:
+        return clean, ""
+
+    # Split cleanly at first major boundary so `rule` stays focused and `rationale` keeps a concise summary
+    lead = truncate_to_tokens(clean, 84).rstrip("…").strip()
+    split_pos = len(lead)
+    for m in re.finditer(r"(?:[。；;!！?？]|\|\|\s*)", lead):
+        if m.end() >= int(len(lead) * 0.45):
+            split_pos = m.end()
+    rule_part = lead[:split_pos].strip(" ,;，；")
+    rest_part = clean[split_pos:].strip(" ,;，；|")
+    # Only populate rationale when an explicit CJK/pipe clause separator existed (avoids diluting code/QA embeddings)
+    if split_pos < len(lead) and rest_part:
+        return (rule_part or truncate_to_tokens(clean, 84)), truncate_to_tokens(rest_part, 48)
+    return truncate_to_tokens(clean, 84), ""
 
 
 def extract_triggers(raw: str, scope: str, entities: list[str], meta_triggers: list[str] | None = None) -> list[str]:
@@ -163,14 +217,21 @@ def severity_weight(severity: str) -> float:
     return {"P0": 1.6, "P1": 1.2, "P2": 1.0}.get(severity, 1.0)
 
 
-def recency_weight(valid_from: str, reference: datetime | None = None) -> float:
+def recency_weight(valid_from: str, reference: datetime | None = None, *, half_life_days: float = 270.0) -> float:
     ref = reference or datetime.now(timezone.utc)
     dt = parse_timestamp(valid_from)
     if dt is None:
         return 1.0
     age_days = max(0.0, (ref - dt).total_seconds() / 86400.0)
-    # Gentle decay: 1.0 today -> ~0.75 at 90 days -> floor 0.5
-    return max(0.5, 1.0 / (1.0 + age_days / 270.0))
+    return max(0.5, 1.0 / (1.0 + age_days / max(1.0, half_life_days)))
+
+
+def _is_ambient_global_doc(node: CompiledNode) -> bool:
+    """Return True if a global node merely mirrors an ambient prompt doc (`AGENTS.md`/`GEMINI.md`/`CLAUDE.md`)."""
+    if node.scope != "global" or not node.source_ref:
+        return False
+    doc_path = node.source_ref.lower().split("#", 1)[0].split("::", 1)[0]
+    return any(doc_path.endswith("/" + name) or doc_path == name for name in _AMBIENT_DOC_NAMES)
 
 
 def query_snapshot_boot(
@@ -180,11 +241,7 @@ def query_snapshot_boot(
     budget: int = 300,
     mode: str = "online",
 ) -> dict[str, Any]:
-    """Build <= budget token L0 wakeup kernel from any SnapshotDB (brain or offline cache).
-
-    Boot discipline: never leak P2 trivia into session wakeup; global boot (project=None)
-    prioritizes cross-project principles & P0 redlines over single-repo items.
-    """
+    """Build <= budget token L0 wakeup kernel with project-first quota & ambient-prompt deduplication."""
     raw_active = db.list_nodes(scope=project, as_of=None)
     # Exclude low-priority P2 trivia, graduated mechanical guards, non-P0 code exemplars, and broken-ref cards from L0 wakeup kernel
     active = [
@@ -196,59 +253,81 @@ def query_snapshot_boot(
         and check_source_freshness(n.source_ref, n.source_hash) != "broken_ref"
     ]
     if project is None:
-        # Global boot: focus on global principles/decisions/lessons & P0 redlines
         global_or_p0 = [n for n in active if n.scope == "global" or n.severity == "P0" or n.type == "principle"]
         if global_or_p0:
             active = global_or_p0
 
-    def _boot_rank(n: CompiledNode) -> tuple[int, int, int, int, str]:
-        is_proj = 1 if (project and n.scope == project) else 0
-        is_global = 1 if n.scope == "global" else 0
-        tier = 0
-        if n.type == "principle" or n.severity == "P0":
-            tier = 4
-        elif n.type == "decision" and (is_proj or is_global):
-            tier = 3
-        elif n.type == "lesson" and (len(n.seen_dates) >= 2 or n.seen_count >= 2 or n.severity == "P1"):
-            tier = 2
-        elif n.type == "decision":
-            tier = 1
-        return (tier, is_proj if project else is_global, len(n.seen_dates), n.seen_count, n.valid_from)
+    def _global_rank(n: CompiledNode) -> tuple[int, int, int, int, str]:
+        non_ambient = 0 if _is_ambient_global_doc(n) else 1
+        tier = 4 if (n.type == "principle" or n.severity == "P0") else (3 if n.type == "decision" else 2)
+        return (non_ambient, tier, len(n.seen_dates), n.seen_count, n.valid_from)
 
-    active.sort(key=_boot_rank, reverse=True)
+    def _proj_rank(n: CompiledNode) -> tuple[int, int, int, int, str]:
+        is_p0 = 1 if n.severity == "P0" else 0
+        # Recurring/explicit project lessons first, then active project decisions
+        kind_pri = 3 if n.type == "lesson" else (2 if n.type == "decision" else 1)
+        return (is_p0, kind_pri, len(n.seen_dates), n.seen_count, n.valid_from)
 
-    header = f"# FOS L0 Kernel (scope={project or 'all'}, snap={db.get_meta('snapshot_version', 'unknown')})"
+    snap_ver = db.get_meta("snapshot_version", "unknown")
+    header = f"# FOS L0 (scope={project or 'all'}, {snap_ver})"
     used = estimate_tokens(header)
     lines = [header]
     entries: list[dict[str, Any]] = []
 
-    for node in active:
-        line = node.l0 or build_l0_line(node)
-        if node.scope and node.scope != "global" and f"({node.scope})" not in line:
-            line = f"{line} ({node.scope})"
-        cost = estimate_tokens(line) + 1
-        if used + cost > budget:
-            if not entries and budget > used + 8:
-                line = truncate_to_tokens(line, budget - used - 1)
-                cost = estimate_tokens(line) + 1
-            else:
-                continue
-        lines.append(line)
-        used += cost
-        entries.append(
-            {
-                "id": node.id,
-                "type": node.type,
-                "scope": node.scope,
-                "severity": node.severity,
-                "seen_count": node.seen_count,
-                "l0": line,
-            }
-        )
+    def _format_boot_line(node: CompiledNode) -> str:
+        base = build_l0_line(node) if node.rule else (node.l0 or build_l0_line(node))
+        if project is None:
+            if node.scope and node.scope != "global" and f"({node.scope})" not in base:
+                return f"{base} ({node.scope})"
+            return base
+        # When project-scoped, header already states scope=<project>; only tag cross-scope non-PRN items
+        if node.scope != project and node.scope == "global" and node.type != "principle":
+            return f"{base} (global)"
+        return base
+
+    def _try_pack(candidates: list[CompiledNode], ceiling: int) -> list[CompiledNode]:
+        nonlocal used
+        skipped: list[CompiledNode] = []
+        for node in candidates:
+            line = _format_boot_line(node)
+            cost = estimate_tokens(line) + 1
+            if used + cost > ceiling:
+                if not entries and ceiling > used + 8:
+                    line = truncate_to_tokens(line, ceiling - used - 1)
+                    cost = estimate_tokens(line) + 1
+                else:
+                    skipped.append(node)
+                    continue
+            lines.append(line)
+            used += cost
+            entries.append(
+                {
+                    "id": node.id,
+                    "type": node.type,
+                    "scope": node.scope,
+                    "severity": node.severity,
+                    "seen_count": node.seen_count,
+                    "l0": line,
+                }
+            )
+        return skipped
+
+    if project:
+        proj_nodes = sorted([n for n in active if n.scope == project], key=_proj_rank, reverse=True)
+        glob_nodes = sorted([n for n in active if n.scope != project], key=_global_rank, reverse=True)
+        # Reserve up to 60% of available budget for project-specific memories first, then global redlines, then project slack
+        proj_ceiling = budget if not glob_nodes else (used + int(max(0, budget - used) * 0.60))
+        overflow_proj = _try_pack(proj_nodes, min(budget, proj_ceiling))
+        _try_pack(glob_nodes, budget)
+        if overflow_proj and used < budget:
+            _try_pack(overflow_proj, budget)
+    else:
+        ordered = sorted(active, key=_global_rank, reverse=True)
+        _try_pack(ordered, budget)
 
     return {
         "mode": mode,
-        "snapshot_version": db.get_meta("snapshot_version", "unknown"),
+        "snapshot_version": snap_ver,
         "project": project,
         "budget_tokens": budget,
         "used_tokens": used,
@@ -272,10 +351,13 @@ def query_snapshot_recall(
     mode: str = "online",
     usage_stats: dict[str, dict[str, Any]] | None = None,
     cwd_stack: dict[str, str] | None = None,
+    exclude_ids: set[str] | list[str] | None = None,
 ) -> dict[str, Any]:
-    """Execute 4-way hybrid recall + RRF + Rerank + strict L1 token budget packing."""
+    """Execute 4-way hybrid recall + semantic-gated RRF/Rerank + anti-rot token budget packing."""
     if kind and kind not in VALID_KINDS:
         raise UsageError(f"Invalid kind '{kind}'. Must be one of: {', '.join(VALID_KINDS)}")
+
+    excluded = {str(x).strip() for x in (exclude_ids or ()) if str(x).strip()}
 
     # Candidate universe filtered by scope, kind, and bi-temporal validity
     valid_nodes = db.list_nodes(scope=scope, kind=kind, as_of=as_of)
@@ -310,16 +392,15 @@ def query_snapshot_recall(
             vec_hits = [(nid, sc) for nid, sc in db.search_vec(q_vec, limit=40) if nid in valid_map]
 
     # Way 3: Trigger & Entity direct match + 1-2 Hop Graph Expansion
-    q_terms = extract_terms(query)
+    q_terms = extract_stemmed_terms(query)
     trigger_hits: list[tuple[str, float]] = []
     min_trig_overlap = 2 if len(q_terms) >= 3 else 1
     for nid, node in valid_map.items():
-        trig_terms = extract_terms(" ".join(node.trigger_when + node.entities))
+        trig_terms = extract_stemmed_terms(" ".join(node.trigger_when + node.entities))
         if not trig_terms or not q_terms:
             continue
         overlap = len(q_terms & trig_terms)
         if overlap >= min_trig_overlap:
-            # Cosine-damped overlap avoids 1-term triggers hijacking rank #1
             score = overlap / math.sqrt(len(q_terms) * len(trig_terms))
             trigger_hits.append((nid, score))
     trigger_hits.sort(key=lambda x: x[1], reverse=True)
@@ -341,7 +422,7 @@ def query_snapshot_recall(
 
     # RRF Fusion across active channels
     has_neural = embedder is not None and not str(getattr(embedder, "model_name", "")).startswith("local_hash")
-    rrf_k = 60.0
+    rrf_k = 25.0 if has_neural else 60.0
     rrf_scores: dict[str, float] = {}
     channels: dict[str, list[str]] = {}
     raw_vec_map: dict[str, float] = {nid: float(sc) for nid, sc in vec_hits}
@@ -364,18 +445,16 @@ def query_snapshot_recall(
                 channels[nid].append(name)
 
     if has_neural:
-        # When a real neural embedder is active, keep vec as primary semantic signal so lexical channels augment rather than drown it
-        _add_channel("vec", vec_hits, weight=2.0)
-        _add_channel("fts", fts_hits, weight=0.95)
-        _add_channel("trigger", trigger_hits[:30], weight=0.5)
-        _add_channel("graph", graph_hits[:20], weight=0.45)
+        _add_channel("vec", vec_hits, weight=2.2)
+        _add_channel("fts", fts_hits, weight=0.90)
+        _add_channel("trigger", trigger_hits[:30], weight=0.45)
+        _add_channel("graph", graph_hits[:20], weight=0.40)
     else:
         _add_channel("fts", fts_hits, weight=1.2)
         _add_channel("vec", vec_hits, weight=1.0)
         _add_channel("trigger", trigger_hits[:30], weight=1.15)
         _add_channel("graph", graph_hits[:20], weight=0.6)
 
-    # If all channels returned nothing (e.g. ultra-short query), fall back to lexical scan over valid nodes
     if not rrf_scores:
         for nid in list(valid_map.keys())[:limit]:
             rrf_scores[nid] = 0.001
@@ -397,50 +476,73 @@ def query_snapshot_recall(
         rerank_scores = reranker.rerank(query, docs)
 
     # Way 4: Temporal, Salience, Anti-Rot Freshness & PlugMem Utility Weighting
+    is_current_state_q = bool(_CURRENT_STATE_RE.search(query))
     ref_time = parse_timestamp(as_of) if as_of else datetime.now(timezone.utc)
+    if as_of is None and is_current_state_q:
+        # On current-state queries ("currently", "now", "最新"), anchor recency to latest candidate so updated facts win
+        cand_dts = [dt for nid in top_ids if (dt := parse_timestamp(valid_map[nid].valid_from)) is not None]
+        if cand_dts:
+            ref_time = min(ref_time, max(cand_dts))
+    half_life = 150.0 if is_current_state_q else 270.0
     u_stats = usage_stats or {}
     final_ranked: list[tuple[str, float, str]] = []
     max_rrf = max((rrf_scores[nid] for nid in top_ids), default=1.0) or 1.0
 
     for nid in top_ids:
+        if nid in excluded:
+            continue
         node = valid_map[nid]
         norm_rrf = rrf_scores[nid] / max_rrf
         lex_rr = rerank_scores.get(nid, 0.0)
         sem_rr = vec_sim_map.get(nid, 0.0)
         if has_neural:
-            # Never discard neural semantic similarity when lexical overlap > 0; blend semantically + lexically
-            rel = 0.68 * sem_rr + 0.14 * lex_rr + 0.18 * norm_rrf
+            # Semantic-gated hybrid fusion: lexical & RRF signals amplify semantically plausible candidates
+            # without rescuing semantically orthogonal false-friend keyword matches
+            lex_sig = 0.52 * lex_rr + 0.48 * norm_rrf
+            rel = 0.80 * sem_rr + 0.20 * lex_sig * (0.35 + 0.65 * sem_rr)
         else:
             rr = lex_rr if lex_rr > 0 else sem_rr
             rel = 0.55 * rr + 0.45 * norm_rrf
-        salience = severity_weight(node.severity) * (1.0 + math.log(1.0 + max(1, node.seen_count))) * recency_weight(node.valid_from, ref_time)
-        # Scope boost for exact project match over 'global'
-        scope_boost = 1.25 if (scope and node.scope == scope) else 1.0
+        salience = (
+            severity_weight(node.severity)
+            * (1.0 + math.log(1.0 + max(1, node.seen_count)))
+            * recency_weight(node.valid_from, ref_time, half_life_days=half_life)
+        )
+        # Calibrated scope prior: prevent generic global P0s from crowding out exact-repo P1/P2 memories
+        if scope and scope != "global":
+            if node.scope == scope:
+                scope_boost = 1.40
+            else:
+                direct_hits = len(q_terms & extract_stemmed_terms(node.rule))
+                scope_boost = 1.0 if direct_hits >= 2 else 0.78
+        else:
+            scope_boost = 1.08 if node.scope == "global" else 1.0
         fresh = check_source_freshness(node.source_ref, node.source_hash)
         util_mult = utility_multiplier(u_stats.get(nid))
         combined = rel * salience * scope_boost * freshness_multiplier(fresh) * util_mult
         final_ranked.append((nid, combined, fresh))
 
     final_ranked.sort(key=lambda x: x[1], reverse=True)
+    top_score = final_ranked[0][1] if final_ranked else 0.0
+    prune_tail = budget <= 1600
 
-    # Strict Token Budget Packing with Submodular Query-Term Coverage
-    # (prevents redundant cards on one sub-topic from crowding out uncovered query concepts like "外键")
+    # Strict Token Budget Packing with Submodular Query-Term Coverage + Anti-Context-Rot Tail Cutoff
     used_tokens = 0
     results: list[dict[str, Any]] = []
-    q_terms_pack = extract_terms(query)
+    q_terms_pack = extract_stemmed_terms(query)
     covered_terms: set[str] = set()
     remaining = list(final_ranked)
 
     while remaining and len(results) < limit:
-        if not results or not q_terms_pack or not (q_terms_pack - covered_terms):
+        uncovered = q_terms_pack - covered_terms
+        if not results or not q_terms_pack or not uncovered:
             best_idx = 0
         else:
-            uncovered = q_terms_pack - covered_terms
             best_idx = 0
             best_val = -1.0
             for idx, (cand_id, base_score, _cf) in enumerate(remaining[:12]):
                 cnode = valid_map[cand_id]
-                cand_terms = extract_terms(cnode.rule + " " + " ".join(cnode.entities))
+                cand_terms = extract_stemmed_terms(cnode.rule + " " + " ".join(cnode.entities))
                 novel = uncovered & cand_terms
                 novel_boost = 1.0 + 0.6 * (len(novel) / max(1, len(uncovered)))
                 val = base_score * novel_boost
@@ -450,8 +552,20 @@ def query_snapshot_recall(
 
         nid, score, fresh = remaining.pop(best_idx)
         node = valid_map[nid]
+        cand_terms = extract_stemmed_terms(node.rule + " " + " ".join(node.entities))
+        cand_novel = uncovered & cand_terms
+
+        # Anti-context-rot cutoff: stop stuffing low-relevance / redundant tail noise once core query is answered
+        if prune_tail and results and top_score > 0:
+            if score < 0.24 * top_score:
+                continue
+            if not cand_novel and score < 0.42 * top_score:
+                continue
+            if not cand_novel and len(results) >= 3 and score < 0.55 * top_score:
+                continue
+
         raw_card = node.to_l1_dict()
-        # Strip pure-indexing / L2-only metadata and empty fields so L1 recall stays ultra-lean
+        # Strip pure-indexing / L2-only metadata and false/empty defaults so L1 recall stays ultra-lean
         _omit_in_recall = (
             "source_hash",
             "verified_at",
@@ -462,6 +576,7 @@ def query_snapshot_recall(
             "confidence",
             "valid_from",
             "status",
+            "guard_hint",
         )
         card: dict[str, Any] = {
             k: v
@@ -471,6 +586,7 @@ def query_snapshot_recall(
             and v != ""
             and v != []
             and v != {}
+            and not (k == "graduated" and v is False)
         }
         if fresh != "untracked":
             card["freshness"] = fresh
@@ -483,7 +599,6 @@ def query_snapshot_recall(
         cost = estimate_json_tokens(card)
         if used_tokens + cost > budget:
             if not results and budget >= 40:
-                # Guarantee at least top-1 trimmed to budget
                 card.pop("rationale", None)
                 card["rule"] = truncate_to_tokens(str(card.get("rule", "")), max(16, budget // 3))
                 cost = estimate_json_tokens(card)
@@ -492,7 +607,7 @@ def query_snapshot_recall(
         results.append(card)
         used_tokens += cost
         if q_terms_pack:
-            covered_terms |= q_terms_pack & extract_terms(node.rule + " " + " ".join(node.entities))
+            covered_terms |= q_terms_pack & cand_terms
 
     return {
         "mode": mode,
@@ -526,73 +641,108 @@ def query_snapshot_mirror(
         reranker=reranker,
         scope=scope,
         budget=2400,
-        limit=16,
+        limit=12,
         mode=mode,
     )
     prop_terms = extract_terms(proposal)
+    prop_stem_terms = extract_stemmed_terms(proposal)
+    recalled_cards = recalled["results"]
+    top_score = float(recalled_cards[0]["score"]) if recalled_cards else 1.0
+
+    # Precompute term document-frequency across recalled pool so ubiquitous repo nouns
+    # (e.g. "gateway", "spring") alone don't trigger unrelated prohibition conflicts
+    card_blobs: dict[str, tuple[CompiledNode | None, set[str], set[str]]] = {}
+    pool_df: dict[str, int] = {}
+    for card in recalled_cards:
+        nid = card["id"]
+        fn = db.get_node(nid)
+        t_list = list(fn.trigger_when) if fn else []
+        e_list = list(fn.entities) if fn else []
+        blob = f"{card['rule']} {' '.join(t_list)} {' '.join(e_list)}"
+        ex_set = extract_terms(blob)
+        st_set = extract_stemmed_terms(blob)
+        card_blobs[nid] = (fn, ex_set, st_set)
+        for tok in st_set:
+            pool_df[tok] = pool_df.get(tok, 0) + 1
+    ubiquitous_cutoff = max(3, (len(recalled_cards) + 1) // 2)
 
     conflicts: list[dict[str, Any]] = []
     lesson_warnings: list[dict[str, Any]] = []
     prior_decisions: list[dict[str, Any]] = []
     blind_spots: list[dict[str, Any]] = []
 
+    conflict_ids: set[str] = set()
     seen_decision_ids: set[str] = set()
 
-    for card in recalled["results"]:
+    for card in recalled_cards:
         nid = card["id"]
         ntype = card["type"]
         rule_text = card["rule"]
-        trig_text = " ".join(card.get("trigger_when") or [])
-        overlap = prop_terms & extract_terms(rule_text + " " + trig_text)
-        if not overlap and card["score"] < 0.25:
+        full_node, ex_set, st_set = card_blobs[nid]
+        trig_list = list(full_node.trigger_when) if full_node else []
+        valid_from = full_node.valid_from if full_node else ""
+
+        overlap = prop_terms & ex_set
+        stem_overlap = prop_stem_terms & st_set
+        specific_overlap = {t for t in stem_overlap if pool_df.get(t, 0) <= ubiquitous_cutoff}
+        score = float(card.get("score", 0.0))
+
+        if not stem_overlap and score < max(0.55, 0.50 * top_score):
             continue
 
-        # 1. Redline check (principles & P0 rules)
-        if ntype == "principle" or card["severity"] == "P0":
-            has_prohibition = any(w in rule_text.lower() for w in _NEGATION_WORDS)
-            if has_prohibition or ntype == "principle":
-                conflicts.append(
-                    {
-                        "id": nid,
-                        "type": ntype,
-                        "severity": card["severity"],
-                        "reason": "Triggered redline/principle constraint",
-                        "rule": rule_text,
-                        "matched_terms": sorted(overlap)[:6],
-                    }
-                )
+        has_prohibition = any(w in rule_text.lower() for w in _NEGATION_WORDS)
+
+        # 1. Conflict / Redline check: catches BOTH P0/principles AND repo-scoped P1/P2 prohibitions,
+        # requiring at least one discriminative topic term (or strong top-rank score) to avoid domain-noun noise.
+        is_prohibition_hit = has_prohibition and (len(specific_overlap) >= 1 or score >= 0.70 * top_score)
+        is_principle_hit = (ntype == "principle" or card["severity"] == "P0") and (
+            len(specific_overlap) >= 2 or score >= 0.70 * top_score
+        )
+        if is_prohibition_hit or is_principle_hit:
+            conflict_ids.add(nid)
+            conflicts.append(
+                {
+                    "id": nid,
+                    "type": ntype,
+                    "severity": card["severity"],
+                    "reason": "Violates active prohibition" if has_prohibition else "Triggered redline/principle constraint",
+                    "rule": rule_text,
+                    "matched_terms": sorted(overlap or stem_overlap)[:6],
+                }
+            )
 
         # 2. Lesson recurrence warning (seen >= 1)
-        if ntype == "lesson" and int(card.get("seen_count", 1)) >= 1:
+        if ntype == "lesson" and int(card.get("seen_count", 1)) >= 1 and (len(stem_overlap) >= 1 or score >= 0.50 * top_score):
             lesson_warnings.append(
                 {
                     "id": nid,
                     "severity": card["severity"],
-                    "seen_count": card["seen_count"],
+                    "seen_count": int(card.get("seen_count", 1)),
                     "rule": rule_text,
                     "rationale": card.get("rationale", ""),
-                    "trigger_when": card.get("trigger_when", []),
+                    "trigger_when": trig_list,
                 }
             )
 
-        # 3. Same-domain historical decisions (active)
+        # 3. Same-domain historical decisions (active, non-redundant with conflicts)
         if ntype == "decision":
             seen_decision_ids.add(nid)
-            prior_decisions.append(
-                {
-                    "id": nid,
-                    "status": card.get("status", "active"),
-                    "valid_from": card.get("valid_from", ""),
-                    "rule": rule_text,
-                    "rationale": card.get("rationale", ""),
-                }
-            )
+            if nid not in conflict_ids and score >= 0.42 * top_score:
+                prior_decisions.append(
+                    {
+                        "id": nid,
+                        "status": full_node.status if full_node else "active",
+                        "valid_from": valid_from,
+                        "rule": rule_text,
+                        "rationale": card.get("rationale", ""),
+                    }
+                )
 
     # Also surface superseded historical decisions in same scope so rejected options are visible
     for node in db.list_nodes(scope=scope, kind="decision", include_inactive=True):
         if node.status == "superseded" and node.id not in seen_decision_ids:
-            node_terms = extract_terms(node.rule + " " + " ".join(node.trigger_when + node.entities))
-            if len(prop_terms & node_terms) >= 2:
+            node_terms = extract_stemmed_terms(node.rule + " " + " ".join(node.trigger_when + node.entities))
+            if len(prop_stem_terms & node_terms) >= 2:
                 prior_decisions.append(
                     {
                         "id": node.id,
@@ -616,7 +766,7 @@ def query_snapshot_mirror(
             }
         )
     has_outcome_support = any(c["type"] == "outcome" for c in recalled["results"])
-    if not has_outcome_support and not prior_decisions:
+    if not has_outcome_support and not prior_decisions and not conflicts:
         blind_spots.append(
             {
                 "kind": "no_prior_outcome",
@@ -1121,6 +1271,7 @@ class BrainEngine:
         budget: int = 1200,
         limit: int = 20,
         cwd_stack: dict[str, str] | None = None,
+        exclude_ids: set[str] | list[str] | None = None,
     ) -> dict[str, Any]:
         usage = load_usage_stats(self.data_dir)
         with self.snapshots.open_current(read_only=True) as db:
@@ -1137,6 +1288,7 @@ class BrainEngine:
                 mode="online",
                 usage_stats=usage,
                 cwd_stack=cwd_stack,
+                exclude_ids=exclude_ids,
             )
         if as_of is None and res.get("results"):
             record_recall_hits(self.data_dir, [str(r["id"]) for r in res["results"] if r.get("id")])

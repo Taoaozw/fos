@@ -23,6 +23,45 @@ _EN_STOPWORDS: frozenset[str] = frozenset(
     }
 )
 
+_EN_STEM_EQUIV: dict[str, str] = {
+    "numeric": "number",
+    "numerical": "number",
+    "numbers": "number",
+    "boolean": "bool",
+    "booleans": "bool",
+    "integer": "int",
+    "integers": "int",
+    "iterable": "iter",
+    "iterator": "iter",
+    "iteration": "iter",
+    "relocation": "relocat",
+    "relocated": "relocat",
+    "relocate": "relocat",
+}
+
+
+def stem_en(token: str) -> str:
+    """Lightweight deterministic English suffix normalizer for lexical matching."""
+    if not token or not token.isascii() or not token.isalpha() or len(token) < 4:
+        return token
+    if token in _EN_STEM_EQUIV:
+        return _EN_STEM_EQUIV[token]
+    if len(token) >= 6 and token.endswith("ation"):
+        return token[:-5] + "at"
+    if len(token) >= 5 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) >= 6 and token.endswith("ing"):
+        base = token[:-3]
+        return base[:-1] if len(base) >= 4 and base[-1] == base[-2] else base
+    if len(token) >= 5 and token.endswith("ed"):
+        base = token[:-2]
+        return base[:-1] if len(base) >= 4 and base[-1] == base[-2] else base
+    if len(token) >= 5 and token.endswith("es") and token[-3] in "sxzho":
+        return token[:-2]
+    if len(token) >= 4 and token.endswith("s") and not token.endswith(("ss", "us", "is")):
+        return token[:-1]
+    return _EN_STEM_EQUIV.get(token, token)
+
 
 def estimate_tokens(text: str) -> int:
     """Fast deterministic token count estimate for CJK + Latin text.
@@ -85,8 +124,23 @@ def extract_terms(text: str) -> set[str]:
     return content if content else raw
 
 
+def extract_stemmed_terms(text: str) -> set[str]:
+    """Extract content terms normalized with lightweight English stemming for recall/rerank overlap."""
+    base = extract_terms(text)
+    out: set[str] = set()
+    for t in base:
+        out.add(t)
+        st = stem_en(t)
+        if st and st not in _EN_STOPWORDS:
+            out.add(st)
+    return out
+
+
+_CLEAN_BREAK_CHARS = "。；;，,、：: \n\t"
+
+
 def truncate_to_tokens(text: str, max_tokens: int) -> str:
-    """Truncate text cleanly to stay within max_tokens."""
+    """Truncate text cleanly to stay within max_tokens, preferring natural clause/word boundaries."""
     if max_tokens <= 0:
         return ""
     if estimate_tokens(text) <= max_tokens:
@@ -99,4 +153,14 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
             lo = mid
         else:
             hi = mid - 1
-    return (text[:lo].rstrip() + "…") if lo > 0 else ""
+    if lo <= 0:
+        return ""
+    # Prefer snapping to a nearby clause/space boundary in the trailing 20% window so words aren't cut in half
+    min_snap = max(4, int(lo * 0.8))
+    best_cut = lo
+    for idx in range(lo, min_snap - 1, -1):
+        if idx < len(text) and text[idx - 1] in _CLEAN_BREAK_CHARS:
+            best_cut = idx - 1
+            break
+    trimmed = text[:best_cut].rstrip(" ,;，；、：:")
+    return (trimmed + "…") if trimmed else (text[:lo].rstrip() + "…")

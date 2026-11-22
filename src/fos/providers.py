@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from fos.config import ProviderConfig
-from fos.tokens import extract_terms, tokenize_for_fts
+from fos.tokens import extract_stemmed_terms, extract_terms, tokenize_for_fts
 
 
 class Embedder(Protocol):
@@ -233,33 +233,37 @@ class LexicalReranker:
 
     def rerank(self, query: str, docs: list[tuple[str, str]]) -> dict[str, float]:
         q_low = query.strip().lower()
-        q_terms = extract_terms(query)
-        doc_terms: list[tuple[str, str, set[str]]] = [
-            (doc_id, text.lower(), extract_terms(text)) for doc_id, text in docs
+        q_exact = extract_terms(query)
+        q_terms = extract_stemmed_terms(query)
+        doc_terms: list[tuple[str, str, set[str], set[str]]] = [
+            (doc_id, text.lower(), extract_stemmed_terms(text), extract_terms(text))
+            for doc_id, text in docs
         ]
         n_docs = max(1, len(doc_terms))
         df: dict[str, int] = {}
         for t in q_terms:
-            df[t] = sum(1 for _, _, dt in doc_terms if t in dt)
+            df[t] = sum(1 for _, _, dt, _ in doc_terms if t in dt)
         idf: dict[str, float] = {t: math.log((n_docs + 1.0) / (df[t] + 1.0)) + 1.0 for t in q_terms}
         total_idf = sum(idf.values()) or 1.0
 
         scores: dict[str, float] = {}
-        for doc_id, t_low, d_terms in doc_terms:
+        for doc_id, t_low, d_terms, d_exact in doc_terms:
             if not q_terms or not d_terms:
                 scores[doc_id] = 0.0
                 continue
             overlap = q_terms & d_terms
-            prec = len(overlap) / len(d_terms)
+            exact_overlap = q_exact & d_exact
+            # Dampen short-doc precision inflation (+6 smoothing) so 1-line boilerplate doesn't beat fuller docs
+            prec = len(overlap) / (len(d_terms) + 6.0)
             rec = sum(idf[t] for t in overlap) / total_idf
             raw_rec = len(overlap) / len(q_terms)
             f1 = (2 * prec * raw_rec / (prec + raw_rec)) if (prec + raw_rec) > 0 else 0.0
             phrase_bonus = 0.25 if (len(q_low) >= 4 and q_low in t_low) else 0.0
             # Reward rare exact query terms (e.g. 外键, shadcn, DataBuffer) & technical identifiers
-            rare_hits = sum(1 for t in overlap if df[t] <= 2 and len(t) >= 2)
+            rare_hits = sum(1 for t in exact_overlap if df.get(t, n_docs) <= 2 and len(t) >= 2)
             rare_bonus = min(0.24, 0.12 * rare_hits)
-            special_q = {t for t in q_terms if len(t) >= 4 and any(ch.isdigit() or ch in "-_" for ch in t)}
-            special_bonus = 0.15 * len(special_q & d_terms) if special_q else 0.0
+            special_q = {t for t in q_exact if len(t) >= 4 and any(ch.isdigit() or ch in "-_" for ch in t)}
+            special_bonus = 0.15 * len(special_q & d_exact) if special_q else 0.0
             scores[doc_id] = min(1.0, 0.55 * rec + 0.25 * f1 + phrase_bonus + rare_bonus + special_bonus)
         return scores
 

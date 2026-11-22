@@ -11,10 +11,10 @@ AI-native cognitive memory CLI backed by an always-on M3 Max brain (`fosd`) with
 
 | Goal | Start Here |
 |---|---|
-| Session-start redlines (<=300t) | `fos boot [--project P] --json` |
-| Recall past lessons / decisions | `fos recall "<query>" [--scope P] [--budget 1200] --json` |
-| Historical point-in-time slice | `fos recall "<query>" --as-of 2026-08 --json` |
-| Pre-decision mirror check | `fos mirror "<proposal>" [--scope P] --json` |
+| Session-start redlines (<=300t) | `fos boot [--project P]` |
+| Recall past lessons / decisions | `fos recall "<query>" [--scope P] [--budget 900]` |
+| Historical point-in-time slice | `fos recall "<query>" --as-of 2026-08` |
+| Pre-decision mirror check | `fos mirror "<proposal>" [--scope P]` |
 | Verbatim L2 evidence & graph | `fos get <ID> --tier L2 --graph --json` |
 | Record pitfall / decision | `fos add --kind lesson\|decision\|principle --scope P "<content>" --json` |
 | Save / evolve code pattern | `fos pattern add <file[::symbol]> "<invariant>" [--supersedes ID] --why "<benefit>" --bench "<cmd>" --json` |
@@ -27,9 +27,9 @@ AI-native cognitive memory CLI backed by an always-on M3 Max brain (`fosd`) with
 
 ## Context & Token Discipline
 
+- **Prefer default compact text for reads**: `fos boot`, `fos recall`, and `fos mirror` emit dense TOON-style `[ID|SEV] rule` lines (~65% fewer tokens than JSON). Add `--json` or `--fields id,severity,rule` only when programmatically parsing output.
 - **Auto-detects project from `cwd`**: omit `--project` on `fos boot` inside a git repo (`--all` overrides).
-- **Compact piped JSON**: `--json` automatically emits single-line compact JSON when captured by agents (pretty on TTY).
-- **Project only needed fields**: use `--fields id,severity,rule` (implies `--json`) to minimize tokens.
+- **Avoid re-fetching L0 rules**: pass `--exclude ID1,ID2` on `fos recall` when those cards are already complete in your L0 boot context.
 - **Progressive L0 -> L1 -> L2**: start with `boot` (L0) -> `recall` (L1) -> `get --tier L2` only when raw evidence is needed.
 - **On-demand discovery**: run `fos describe <cmd>` for exact flags/examples, or read `references/commands.md` for `ingest`, `dream`, `eval`, `undo`, `update`, and exit codes.
 

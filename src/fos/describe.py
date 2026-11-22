@@ -33,15 +33,16 @@ COMMAND_SPECS: list[dict[str, Any]] = [
         "aliases": ["rec", "r", "search"],
         "readOnly": True,
         "summary": "4-way hybrid recall (FTS5 BM25 + sqlite-vec + trigger/graph + temporal) within token budget",
-        "usage": 'fos recall "<query>" [--kind K] [--scope P] [--as-of YYYY-MM] [--budget 1200] [--limit 20] [--fields F] [--json]',
+        "usage": 'fos recall "<query>" [--kind K] [--scope P] [--as-of YYYY-MM] [--budget 1200] [--limit 20] [--exclude IDs] [--fields F] [--json]',
         "flags": [
             {"name": "--kind", "type": "string", "desc": "filter: thought|decision|lesson|outcome|principle"},
             {"name": "--scope", "type": "string", "desc": "project/domain scope filter"},
             {"name": "--as-of", "type": "string", "desc": "historical time-travel slice, e.g. 2026-08 or ISO8601"},
             {"name": "--budget", "type": "int", "default": "1200", "desc": "strict L1 token budget"},
             {"name": "--limit", "type": "int", "default": "20", "desc": "max cards to return"},
+            {"name": "--exclude", "type": "string", "desc": "comma-separated node IDs to skip (e.g. already loaded in L0 boot)"},
             {"name": "--fields", "type": "string", "desc": "comma-separated JSON fields to keep (implies --json)"},
-            {"name": "--json", "type": "bool", "default": "false", "desc": "JSON output (compact when piped)"},
+            {"name": "--json", "type": "bool", "default": "false", "desc": "JSON output (compact in agent/piped envs)"},
         ],
         "examples": [
             'fos recall "macOS rsync deploy" --scope fops --json',

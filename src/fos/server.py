@@ -294,9 +294,11 @@ def create_app(
         budget: int = Query(default=1200, ge=64, le=16000),
         limit: int = Query(default=20, ge=1, le=100),
         cwd_stack: str | None = Query(default=None),
+        exclude: str | None = Query(default=None),
     ) -> dict[str, Any]:
         try:
             stack_map = parse_stack_param(cwd_stack) if cwd_stack else None
+            excl_list = [x.strip() for x in exclude.split(",") if x.strip()] if exclude else None
             return brain.recall(
                 q,
                 kind=kind,
@@ -305,6 +307,7 @@ def create_app(
                 budget=budget,
                 limit=limit,
                 cwd_stack=stack_map or None,
+                exclude_ids=excl_list,
             )
         except FosError as exc:
             raise _http_from_fos_error(exc) from exc
