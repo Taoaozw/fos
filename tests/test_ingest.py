@@ -167,18 +167,55 @@ def test_ingest_git_and_high_signal_chat_collectors(tmp_path: Path) -> None:
     assert fops_events[0]["kind"] == "lesson"
     assert fops_events[0]["scope"] == "fops"
 
-    # 7. docs collector (AGENTS.md / FRONTEND.md rules with context7 boilerplate stripped & SHA cursor)
+    # 7. docs collector (AGENTS.md / docs/agents/*.md with context7 boilerplate stripped & SHA cursor)
     doc_dir = tmp_path / "design-repo"
-    (doc_dir / "docs").mkdir(parents=True)
+    (doc_dir / "docs" / "agents").mkdir(parents=True)
     (doc_dir / "AGENTS.md").write_text(
         "# 代码规范\n\n## 前端规范\n所有 UI 一律使用 shadcn Base UI 组件和语义主题 Token，禁止写死十六进制颜色或 Tailwind 调色板颜色。\n"
         "<!-- context7 -->\nUse ctx7 CLI boilerplate\n<!-- context7 -->\n",
         encoding="utf-8",
     )
-    doc_events = collect_hindsight_events("docs", root_dir=doc_dir, cursor_path=cursor_path)
-    assert len(doc_events) == 1
-    assert doc_events[0]["scope"] == "design-repo"
-    assert "shadcn Base UI" in doc_events[0]["raw"]
-    assert "ctx7 CLI boilerplate" not in doc_events[0]["raw"]
-    # Unchanged doc produces 0 duplicates via SHA-256 cursor
+    (doc_dir / "docs" / "agents" / "frontend-conventions.md").write_text(
+        "# 前端设计规范\n\n"
+        "## 字体规则\n" + ("按钮、徽章和 Tab 控件统一使用 font-normal，避免中文字重发虚。" * 25) + "\n\n"
+        "## 状态边界\n" + ("表单验证必须返回可枚举的错误码，不得静默吞掉错误。" * 25) + "\n",
+        encoding="utf-8",
+    )
+    # Limit=2 takes AGENTS.md (1 section) + first section of frontend-conventions.md;
+    # frontend-conventions.md must NOT be marked complete in cursor until fully emitted
+    partial = collect_hindsight_events("docs", root_dir=doc_dir, cursor_path=cursor_path, limit=2)
+    assert len(partial) == 2
+    assert all("ctx7 CLI boilerplate" not in e["raw"] for e in partial)
+    doc_events = collect_hindsight_events("docs", root_dir=doc_dir, cursor_path=cursor_path, limit=10)
+    assert len(doc_events) == 2
+    assert any("font-normal" in e["raw"] for e in doc_events)
+    assert any("可枚举的错误码" in e["raw"] for e in doc_events)
+    # Unchanged docs produce 0 duplicates via SHA-256 cursor
     assert collect_hindsight_events("docs", root_dir=doc_dir, cursor_path=cursor_path) == []
+
+
+def test_automated_hindsight_p0_does_not_mint_raw_golden_eval_cases(tmp_path: Path) -> None:
+    from fos.engine import BrainEngine
+
+    engine = BrainEngine(tmp_path / "brain")
+    engine.add_atom(
+        kind="principle",
+        scope="global",
+        source="hindsight:docs:global:gemini",
+        content="Hindsight: [GEMINI.md · Overview]\nYou MUST inspect before guessing when uncertain.",
+        meta={"severity": "P0"},
+    )
+    # Automated ingest must NOT prematurely freeze raw text as pinned golden recall cases
+    assert engine.ledger.load_eval_cases() == []
+
+    # Manual capture MUST continue to synthesize golden recall cases
+    engine.add_atom(
+        kind="principle",
+        scope="global",
+        source="manual",
+        content="本地 Agent 工具采用 CLI + Skill 交付，禁止接入 MCP。",
+        meta={"severity": "P0"},
+    )
+    cases = engine.ledger.load_eval_cases()
+    assert len(cases) == 1
+    assert cases[0].pinned is True

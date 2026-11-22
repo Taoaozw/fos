@@ -423,22 +423,36 @@ def _collect_docs_events(
             for p in sorted(rules_dir.glob("*.md")):
                 candidates.append(("global", "hindsight:docs:global:claude-rules", p))
 
-    # 2. Repository AGENTS.md / LESSONS.md / docs/FRONTEND.md / docs/DESIGN.md
-    for repo in _discover_git_repos(root_dir):
-        scope = repo.name.lower()
+    # 2. Repository AGENTS.md / LESSONS.md / docs/FRONTEND.md / docs/DESIGN.md / docs/agents/*.md
+    def _add_repo_docs(repo_dir: Path) -> None:
+        rscope = repo_dir.name.lower()
+        rsrc = f"hindsight:docs:{rscope}"
+        seen_paths: set[Path] = set()
         for rel in _REPO_DOC_NAMES:
-            p = repo / rel
+            p = repo_dir / rel
             if p.is_file():
-                candidates.append((scope, f"hindsight:docs:{scope}", p))
+                rp = p.resolve()
+                if rp not in seen_paths:
+                    seen_paths.add(rp)
+                    candidates.append((rscope, rsrc, p))
+        agents_dir = repo_dir / "docs" / "agents"
+        if agents_dir.is_dir():
+            for p in sorted(agents_dir.glob("*.md")):
+                if p.is_file():
+                    rp = p.resolve()
+                    if rp not in seen_paths:
+                        seen_paths.add(rp)
+                        candidates.append((rscope, rsrc, p))
+
+    repos = _discover_git_repos(root_dir)
+    for repo in repos:
+        _add_repo_docs(repo)
 
     # Also support scanning a plain non-git directory when explicitly passed via --root
-    if root_dir is not None and not _discover_git_repos(root_dir):
+    if root_dir is not None and not repos:
         base = Path(root_dir).expanduser().resolve()
         if base.is_dir():
-            for rel in _REPO_DOC_NAMES:
-                p = base / rel
-                if p.is_file():
-                    candidates.append((base.name.lower(), f"hindsight:docs:{base.name.lower()}", p))
+            _add_repo_docs(base)
 
     for scope, source_label, fpath in candidates:
         if len(events) >= limit:
@@ -466,8 +480,10 @@ def _collect_docs_events(
         kind = "lesson" if is_lessons else ("principle" if scope == "global" else "decision")
         severity = "P0" if scope == "global" else "P1"
 
+        completed_file = True
         for heading, body in _split_markdown_sections(cleaned):
             if len(events) >= limit:
+                completed_file = False
                 break
             payload_text = f"Hindsight: [{fpath.name} · {heading}]\n{body}"
             red = redact_secrets(payload_text)
@@ -489,7 +505,8 @@ def _collect_docs_events(
                 }
             )
 
-        cursors[ckey] = digest
+        if completed_file:
+            cursors[ckey] = digest
 
     if cursor_path is not None:
         _save_cursors(cursor_path, cursors)
