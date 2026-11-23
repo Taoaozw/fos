@@ -51,7 +51,7 @@ export function App() {
   const [activeTab, setActiveTab] = useState<string>("overview")
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [cardFilterPreset, setCardFilterPreset] = useState<CardFilterPreset | null>(null)
-  const [isDark, setIsDark] = useState<boolean>(true)
+  const [isDark, setIsDark] = useState<boolean>(false)
   const [themeVersion, setThemeVersion] = useState<number>(0)
 
   const [addOpen, setAddOpen] = useState(false)

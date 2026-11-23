@@ -2,7 +2,10 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   IconArchive,
+  IconArrowRight,
   IconCheck,
+  IconChevronDown,
+  IconChevronRight,
   IconCopy,
   IconEdit,
   IconPin,
@@ -23,7 +26,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Select,
   SelectContent,
@@ -32,6 +34,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Textarea } from "@/components/ui/textarea"
 import { fosApi } from "@/lib/api"
 import { usePanelTransition, useRevealGroup } from "@/lib/motion"
@@ -42,6 +45,77 @@ interface CardsPanelProps {
   selectedNodeId: string | null
   onSelectNode: (id: string) => void
   filterPreset?: CardFilterPreset | null
+}
+
+const STATUS_LABELS: Record<string, string> = {
+  active: "Active（活跃）",
+  __all__: "全部状态",
+  superseded: "Superseded",
+  archived: "Archived",
+}
+
+const SEVERITY_LABELS: Record<string, string> = {
+  __all__: "全部优先级",
+  P0: "P0 红线",
+  P1: "P1 重要",
+  P2: "P2 窄约束",
+}
+
+const KIND_LABELS: Record<string, string> = {
+  __all__: "全部类型",
+  principle: "principle",
+  lesson: "lesson",
+  decision: "decision",
+  thought: "thought",
+  outcome: "outcome",
+}
+
+const SPECIAL_LABELS: Record<string, string> = {
+  all: "全部专题",
+  patterns: "代码范式 Patterns",
+  issues: "漂移·断链 Issues",
+  guards: "静态守卫 Guards",
+}
+
+function CopyableCodeStrip({
+  text,
+  prefix,
+  copyText,
+}: {
+  text: string
+  prefix?: string
+  copyText?: string
+}) {
+  const [copied, setCopied] = useState(false)
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(copyText ?? text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      toast.error("复制失败")
+    }
+  }
+
+  return (
+    <div className="group flex items-start gap-2 rounded-lg border border-border/80 bg-muted/35 px-3 py-2">
+      <div className="min-w-0 flex-1 overflow-x-auto font-mono text-xs leading-relaxed text-foreground">
+        {prefix && <span className="mr-1.5 text-muted-foreground select-none">{prefix}</span>}
+        <span className="whitespace-pre-wrap break-words">{text}</span>
+      </div>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-xs"
+        onClick={handleCopy}
+        aria-label="复制"
+        className="shrink-0 text-muted-foreground opacity-70 transition-opacity hover:opacity-100"
+      >
+        {copied ? <IconCheck className="size-3.5 text-chart-2" /> : <IconCopy className="size-3.5" />}
+      </Button>
+    </div>
+  )
 }
 
 function parseEvidenceRaw(raw: string): { prefix: string; lang: string; code: string; suffix: string } | null {
@@ -56,11 +130,12 @@ function parseEvidenceRaw(raw: string): { prefix: string; lang: string; code: st
 
 function EvidenceBlock({ raw }: { raw: string }) {
   const [copied, setCopied] = useState(false)
+  const [showMeta, setShowMeta] = useState(false)
   const parsed = useMemo(() => parseEvidenceRaw(raw), [raw])
 
   if (!parsed) {
     return (
-      <div className="rounded-md border border-border bg-muted/30 p-2.5 font-mono text-xs whitespace-pre-wrap text-foreground">
+      <div className="rounded-lg border border-border/80 bg-muted/30 p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-foreground">
         {raw}
       </div>
     )
@@ -79,26 +154,41 @@ function EvidenceBlock({ raw }: { raw: string }) {
   return (
     <div className="flex flex-col gap-2">
       {parsed.prefix && (
-        <div className="rounded-md border border-border bg-muted/25 p-2.5 font-mono text-xs whitespace-pre-wrap text-muted-foreground">
-          {parsed.prefix}
+        <div className="overflow-hidden rounded-lg border border-border/70 bg-muted/20">
+          <button
+            type="button"
+            onClick={() => setShowMeta((v) => !v)}
+            className="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+          >
+            <span className="flex items-center gap-1.5 font-medium">
+              {showMeta ? <IconChevronDown className="size-3.5" /> : <IconChevronRight className="size-3.5" />}
+              原始结构化元信息
+            </span>
+            <span className="font-mono text-[11px]">{showMeta ? "收起" : "展开"}</span>
+          </button>
+          {showMeta && (
+            <div className="border-t border-border/70 px-3 py-2.5 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-muted-foreground">
+              {parsed.prefix}
+            </div>
+          )}
         </div>
       )}
-      <div className="overflow-hidden rounded-md border border-border bg-background">
-        <div className="flex items-center justify-between border-b border-border bg-muted/40 px-2.5 py-1">
-          <Badge variant="outline" className="rounded-md font-mono text-xs">
+      <div className="overflow-hidden rounded-lg border border-border/80 bg-background">
+        <div className="flex items-center justify-between border-b border-border/80 bg-muted/35 px-3 py-1.5">
+          <Badge variant="outline" className="h-5 rounded-md bg-background font-mono text-[11px]">
             {parsed.lang}
           </Badge>
           <Button variant="ghost" size="xs" className="font-normal text-xs" onClick={copyCode}>
-            {copied ? <IconCheck className="size-3.5" /> : <IconCopy className="size-3.5" />}
+            {copied ? <IconCheck className="size-3.5 text-chart-2" /> : <IconCopy className="size-3.5" />}
             {copied ? "已复制" : "复制骨架"}
           </Button>
         </div>
-        <pre className="max-h-72 overflow-auto p-3 font-mono text-xs leading-relaxed text-foreground">
+        <pre className="overflow-x-auto p-3.5 font-mono text-xs leading-relaxed text-foreground">
           <code>{parsed.code}</code>
         </pre>
       </div>
       {parsed.suffix && (
-        <div className="rounded-md border border-border bg-muted/25 p-2.5 font-mono text-xs whitespace-pre-wrap text-muted-foreground">
+        <div className="rounded-lg border border-border/70 bg-muted/25 p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-muted-foreground">
           {parsed.suffix}
         </div>
       )}
@@ -130,7 +220,10 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
 
   const queryClient = useQueryClient()
   const listRef = useRef<HTMLDivElement | null>(null)
-  const detailRef = useRef<HTMLDivElement | null>(null)
+  const detailBodyRef = useRef<HTMLDivElement | null>(null)
+  const detailContentRef = useRef<HTMLDivElement | null>(null)
+
+  const nodeIdSet = useMemo(() => new Set(dashboard.nodes.map((n) => n.id)), [dashboard.nodes])
 
   const filteredNodes = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -165,6 +258,10 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
     queryFn: () => fosApi.getNode(selectedNodeId!, "L2", true),
     enabled: Boolean(selectedNodeId),
   })
+
+  useEffect(() => {
+    detailBodyRef.current?.scrollTo({ top: 0 })
+  }, [selectedNodeId])
 
   const pinMutation = useMutation({
     mutationFn: (id: string) => fosApi.pinNode(id),
@@ -226,10 +323,10 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
     duration: 0.22,
     maxItems: 24,
   })
-  usePanelTransition(detailRef, [selectedNodeId, detailNode?.id], { x: 8, y: 0, duration: 0.22 })
+  usePanelTransition(detailContentRef, [detailNode?.id], { x: 0, y: 4, duration: 0.18 })
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-3.5">
       {/* Filter Toolbar */}
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative min-w-56 flex-1">
@@ -243,7 +340,7 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
         </div>
         <Select value={scope} onValueChange={(v) => setScope(v ?? "__all__")}>
           <SelectTrigger size="sm" className="w-36 font-mono text-xs">
-            <SelectValue placeholder="Scope" />
+            <SelectValue>{(v: string | null) => (!v || v === "__all__" ? "全部 Scope" : v)}</SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="__all__">全部 Scope</SelectItem>
@@ -256,7 +353,7 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
         </Select>
         <Select value={status} onValueChange={(v) => setStatus(v ?? "__all__")}>
           <SelectTrigger size="sm" className="w-36 text-xs">
-            <SelectValue placeholder="状态" />
+            <SelectValue>{(v: string | null) => (v ? STATUS_LABELS[v] ?? v : "状态")}</SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="active">Active（活跃）</SelectItem>
@@ -267,7 +364,7 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
         </Select>
         <Select value={severity} onValueChange={(v) => setSeverity(v ?? "__all__")}>
           <SelectTrigger size="sm" className="w-32 text-xs">
-            <SelectValue placeholder="优先级" />
+            <SelectValue>{(v: string | null) => (v ? SEVERITY_LABELS[v] ?? v : "优先级")}</SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="__all__">全部优先级</SelectItem>
@@ -278,7 +375,7 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
         </Select>
         <Select value={kind} onValueChange={(v) => setKind(v ?? "__all__")}>
           <SelectTrigger size="sm" className="w-32 text-xs">
-            <SelectValue placeholder="类型" />
+            <SelectValue>{(v: string | null) => (v ? KIND_LABELS[v] ?? v : "类型")}</SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="__all__">全部类型</SelectItem>
@@ -293,8 +390,8 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
           value={special}
           onValueChange={(v) => setSpecial((v as "all" | "patterns" | "issues" | "guards") ?? "all")}
         >
-          <SelectTrigger size="sm" className="w-36 text-xs">
-            <SelectValue placeholder="专题" />
+          <SelectTrigger size="sm" className="w-40 text-xs">
+            <SelectValue>{(v: string | null) => (v ? SPECIAL_LABELS[v] ?? v : "专题")}</SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部专题</SelectItem>
@@ -306,105 +403,124 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
       </div>
 
       {/* Master-Detail Split */}
-      <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-12">
-        <div ref={listRef} className="flex flex-col border-y border-border divide-y divide-border lg:col-span-7">
-          {filteredNodes.length === 0 ? (
-            <div className="py-10 text-center text-sm text-muted-foreground">
-              当前筛选条件下没有匹配的记忆卡片。
-            </div>
-          ) : (
-            filteredNodes.map((n) => {
-              const active = n.id === selectedNodeId
-              return (
-                <div
-                  key={n.id}
-                  data-anim="card-row"
-                  onClick={() => onSelectNode(n.id)}
-                  className={`flex cursor-pointer flex-col gap-1.5 px-3 py-2.5 transition-colors hover:bg-accent/40 ${
-                    active ? "bg-accent/55" : ""
-                  }`}
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="font-mono text-xs font-medium text-foreground">{n.id}</span>
-                      <Badge
-                        variant={n.severity === "P0" ? "destructive" : "secondary"}
-                        className="h-4 rounded-sm px-1.5 font-mono text-[10px]"
-                      >
-                        {n.severity}
-                      </Badge>
-                      <span className="font-mono text-[11px] text-muted-foreground">{n.type}</span>
-                      <span className="font-mono text-[11px] text-chart-1">{n.scope}</span>
-                      {n.status !== "active" && (
-                        <Badge variant="secondary" className="h-4 rounded-sm px-1.5 text-[10px]">
-                          {n.status}
+      <div className="grid grid-cols-1 gap-4 lg:h-[calc(100dvh-11.25rem)] lg:min-h-[540px] lg:grid-cols-12 lg:overflow-hidden">
+        {/* Left Card List */}
+        <div className="flex flex-col overflow-hidden rounded-xl border border-border bg-card/50 lg:col-span-6 lg:h-full">
+          <div
+            ref={listRef}
+            className="flex-1 divide-y divide-border/80 overflow-y-auto overscroll-contain"
+          >
+            {filteredNodes.length === 0 ? (
+              <div className="py-12 text-center text-sm text-muted-foreground">
+                当前筛选条件下没有匹配的记忆卡片。
+              </div>
+            ) : (
+              filteredNodes.map((n) => {
+                const active = n.id === selectedNodeId
+                return (
+                  <div
+                    key={n.id}
+                    data-anim="card-row"
+                    onClick={() => onSelectNode(n.id)}
+                    className={`flex cursor-pointer flex-col gap-1.5 border-l-2 px-3.5 py-3 transition-colors hover:bg-accent/45 ${
+                      active
+                        ? "border-l-primary bg-accent/65"
+                        : "border-l-transparent"
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-mono text-xs font-medium text-foreground">{n.id}</span>
+                        <Badge
+                          variant={n.severity === "P0" ? "destructive" : "secondary"}
+                          className="h-4 rounded-sm px-1.5 font-mono text-[10px]"
+                        >
+                          {n.severity}
                         </Badge>
-                      )}
-                      {n.pinned && (
-                        <Badge variant="destructive" className="h-4 rounded-sm px-1.5 text-[10px]">
-                          PINNED
-                        </Badge>
-                      )}
-                      {n.compat?.pattern === "code_exemplar" && (
-                        <Badge variant="outline" className="h-4 rounded-sm px-1.5 font-mono text-[10px] text-chart-1">
-                          pattern{n.compat.lang ? `:${n.compat.lang}` : ""}
-                        </Badge>
-                      )}
+                        <span className="font-mono text-[11px] text-muted-foreground">{n.type}</span>
+                        <span className="font-mono text-[11px] text-chart-1">{n.scope}</span>
+                        {n.status !== "active" && (
+                          <Badge variant="secondary" className="h-4 rounded-sm px-1.5 text-[10px]">
+                            {n.status}
+                          </Badge>
+                        )}
+                        {n.pinned && (
+                          <Badge variant="destructive" className="h-4 rounded-sm px-1.5 text-[10px]">
+                            PINNED
+                          </Badge>
+                        )}
+                        {n.compat?.pattern === "code_exemplar" && (
+                          <Badge variant="outline" className="h-4 rounded-sm px-1.5 font-mono text-[10px] text-chart-1">
+                            pattern{n.compat.lang ? `:${n.compat.lang}` : ""}
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
+                        {n.freshness && n.freshness !== "untracked" && (
+                          <span
+                            title={`freshness: ${n.freshness}`}
+                            className={`size-1.5 rounded-full ${
+                              n.freshness === "fresh"
+                                ? "bg-chart-2"
+                                : n.freshness === "drifted"
+                                  ? "bg-chart-3"
+                                  : "bg-chart-5"
+                            }`}
+                          />
+                        )}
+                        {(n.recall_hits ?? 0) > 0 && <span>hits:{n.recall_hits}</span>}
+                        <span>seen:{n.seen_count} · {(n.valid_from || "").slice(0, 10)}</span>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
-                      {n.freshness && n.freshness !== "untracked" && (
-                        <span
-                          title={`freshness: ${n.freshness}`}
-                          className={`size-1.5 rounded-full ${
-                            n.freshness === "fresh"
-                              ? "bg-chart-2"
-                              : n.freshness === "drifted"
-                                ? "bg-chart-3"
-                                : "bg-chart-5"
-                          }`}
-                        />
-                      )}
-                      {(n.recall_hits ?? 0) > 0 && <span>hits:{n.recall_hits}</span>}
-                      <span>seen:{n.seen_count} · {(n.valid_from || "").slice(0, 10)}</span>
-                    </div>
+                    <div className="text-[14px] font-medium leading-6 text-foreground">{n.rule}</div>
+                    {n.rationale && (
+                      <div className="line-clamp-2 text-[13px] leading-relaxed text-muted-foreground">
+                        原因：{n.rationale}
+                      </div>
+                    )}
+                    {n.guard_hint && (
+                      <div className="flex items-start gap-1.5 text-xs text-chart-2">
+                        <IconShieldCheck className="mt-0.5 size-3.5 shrink-0" />
+                        <span className="line-clamp-1">守卫建议：{n.guard_hint}</span>
+                      </div>
+                    )}
                   </div>
-                  <div className="text-[14px] font-medium leading-6 text-foreground">{n.rule}</div>
-                  {n.rationale && (
-                    <div className="line-clamp-2 text-[13px] leading-relaxed text-muted-foreground">
-                      原因：{n.rationale}
-                    </div>
-                  )}
-                  {n.guard_hint && (
-                    <div className="flex items-start gap-1.5 text-xs text-chart-2">
-                      <IconShieldCheck className="mt-0.5 size-3.5 shrink-0" />
-                      <span className="line-clamp-1">守卫建议：{n.guard_hint}</span>
-                    </div>
-                  )}
-                </div>
-              )
-            })
-          )}
+                )
+              })
+            )}
+          </div>
         </div>
 
         {/* Right Detail Panel */}
-        <div
-          ref={detailRef}
-          className="flex flex-col gap-3 border-t border-border pt-3 lg:sticky lg:top-14 lg:col-span-5 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-4"
-        >
+        <div className="flex flex-col overflow-hidden rounded-xl border border-border bg-card shadow-xs lg:col-span-6 lg:h-full">
           {!selectedNodeId ? (
-            <div className="py-12 text-center text-sm text-muted-foreground">
+            <div className="flex flex-1 items-center justify-center p-10 text-center text-sm text-muted-foreground">
               点击左侧任意记忆卡片，查看 L1/L2 无损原文证据、双时态关系，或执行纠偏 / 归档 / 钉选。
             </div>
           ) : detailQuery.isLoading ? (
-            <div className="py-12 text-center text-sm text-muted-foreground">
-              加载 L2 证据与双时态图谱...
+            <div className="flex flex-1 flex-col gap-4 p-5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex gap-1.5">
+                  <Skeleton className="h-5 w-16" />
+                  <Skeleton className="h-5 w-10" />
+                  <Skeleton className="h-5 w-24" />
+                </div>
+                <Skeleton className="h-6 w-48" />
+              </div>
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-4 w-2/3" />
+              <Separator />
+              <Skeleton className="h-14 w-full rounded-lg" />
+              <Skeleton className="h-24 w-full rounded-lg" />
+              <Skeleton className="h-44 w-full rounded-lg" />
             </div>
           ) : detailNode ? (
-            <>
-              <div className="flex flex-col gap-2 border-b border-border pb-3">
+            <div ref={detailContentRef} className="flex min-h-0 flex-1 flex-col">
+              {/* Pinned Detail Header */}
+              <div className="flex shrink-0 flex-col gap-2.5 border-b border-border bg-card px-5 py-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <Badge variant="outline" className="rounded-sm font-mono text-xs">
+                    <Badge variant="outline" className="rounded-sm font-mono text-xs font-medium">
                       {detailNode.id}
                     </Badge>
                     <Badge
@@ -413,7 +529,7 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
                     >
                       {detailNode.severity}
                     </Badge>
-                    <Badge variant="outline" className="rounded-md font-mono text-xs">
+                    <Badge variant="outline" className="rounded-md font-mono text-xs text-chart-1">
                       {detailNode.scope}
                     </Badge>
                     <Badge variant="outline" className="rounded-md text-xs">
@@ -425,8 +541,8 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
                           detailNode.freshness === "broken_ref"
                             ? "destructive"
                             : detailNode.freshness === "drifted"
-                            ? "secondary"
-                            : "outline"
+                              ? "secondary"
+                              : "outline"
                         }
                         className="rounded-md font-mono text-xs"
                       >
@@ -439,7 +555,7 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
                       </Badge>
                     )}
                   </div>
-                  <div className="flex flex-wrap items-center gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1">
                     <Button
                       variant="outline"
                       size="xs"
@@ -496,22 +612,37 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
                     </Button>
                   </div>
                 </div>
-                <h3 className="text-sm font-medium leading-snug text-foreground">
+
+                <h3 className="text-[15px] font-semibold leading-snug text-foreground">
                   {detailNode.rule}
                 </h3>
-                <div className="font-mono text-xs text-muted-foreground">
-                  Seen {detailNode.seen_count}× · hits {detailNode.recall_hits ?? 0} ·
-                  utility {Math.round((detailNode.utility_score ?? 0.5) * 100)}% (+{detailNode.useful_count ?? 0}/-{detailNode.noise_count ?? 0}) ·{" "}
-                  {(detailNode.valid_from || "").slice(0, 19)} →{" "}
-                  {detailNode.valid_until ? detailNode.valid_until.slice(0, 19) : "present"}
+
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[11px] text-muted-foreground">
+                  <span>Seen {detailNode.seen_count}×</span>
+                  <span>·</span>
+                  <span>hits {detailNode.recall_hits ?? 0}</span>
+                  <span>·</span>
+                  <span>
+                    utility {Math.round((detailNode.utility_score ?? 0.5) * 100)}% (+
+                    {detailNode.useful_count ?? 0}/-{detailNode.noise_count ?? 0})
+                  </span>
+                  <span>·</span>
+                  <span>
+                    {(detailNode.valid_from || "").slice(0, 19)} →{" "}
+                    {detailNode.valid_until ? detailNode.valid_until.slice(0, 19) : "present"}
+                  </span>
                 </div>
               </div>
 
-              <div className="flex flex-col gap-3.5">
+              {/* Single Smooth Scrollable Body */}
+              <div
+                ref={detailBodyRef}
+                className="flex flex-1 flex-col gap-5 overflow-y-auto overscroll-contain px-5 py-4"
+              >
                 {detailNode.superseded_by && (
-                  <div className="flex items-center justify-between rounded-md border border-border bg-muted/40 px-3 py-2 text-xs">
+                  <div className="flex items-center justify-between rounded-lg border border-border bg-muted/40 px-3.5 py-2.5 text-xs">
                     <span className="text-muted-foreground">
-                      已被新规则替代：{detailNode.superseded_by}
+                      已被新规则替代：<span className="font-mono font-medium text-foreground">{detailNode.superseded_by}</span>
                     </span>
                     <Button
                       variant="outline"
@@ -523,31 +654,27 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
                   </div>
                 )}
 
-                {detailNode.guard_pattern && (
-                  <div className="flex flex-col gap-1">
-                    <div className="text-xs font-medium text-muted-foreground">
-                      确定性静态守卫 Guard Pattern (fos guard)
+                {detailNode.rationale && (
+                  <section className="flex flex-col gap-1.5">
+                    <div className="text-[11px] font-medium tracking-wide text-muted-foreground">
+                      原因 Rationale
                     </div>
-                    <div className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-foreground break-all">
-                      {detailNode.guard_pattern}
-                    </div>
-                  </div>
+                    <p className="text-sm leading-relaxed text-foreground">{detailNode.rationale}</p>
+                  </section>
                 )}
 
                 {detailNode.source_ref && (
-                  <div className="flex flex-col gap-1">
-                    <div className="text-xs font-medium text-muted-foreground">
-                      权威源指针 Source Pointer (Progressive Disclosure)
+                  <section className="flex flex-col gap-1.5">
+                    <div className="text-[11px] font-medium tracking-wide text-muted-foreground">
+                      权威源指针 Source Pointer
                     </div>
-                    <div className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-foreground break-all">
-                      {detailNode.source_ref}
-                    </div>
-                  </div>
+                    <CopyableCodeStrip text={detailNode.source_ref} />
+                  </section>
                 )}
 
                 {detailNode.compat && Object.keys(detailNode.compat).length > 0 && (
-                  <div className="flex flex-col gap-1.5">
-                    <div className="text-xs font-medium text-muted-foreground">
+                  <section className="flex flex-col gap-2">
+                    <div className="text-[11px] font-medium tracking-wide text-muted-foreground">
                       框架版本包络 Compat Envelope (SemVer)
                     </div>
                     <div className="flex flex-wrap gap-1.5">
@@ -563,88 +690,112 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
                       ))}
                     </div>
                     {detailNode.compat.bench_cmd && (
-                      <div className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-foreground break-all">
-                        verify: {detailNode.compat.bench_cmd}
-                      </div>
+                      <CopyableCodeStrip
+                        prefix="verify:"
+                        text={detailNode.compat.bench_cmd}
+                        copyText={detailNode.compat.bench_cmd}
+                      />
                     )}
-                  </div>
+                  </section>
                 )}
 
-                {detailNode.rationale && (
-                  <div className="flex flex-col gap-1">
-                    <div className="text-xs font-medium text-muted-foreground">原因 Rationale</div>
-                    <div className="text-sm text-foreground">{detailNode.rationale}</div>
-                  </div>
+                {detailNode.guard_pattern && (
+                  <section className="flex flex-col gap-1.5">
+                    <div className="text-[11px] font-medium tracking-wide text-muted-foreground">
+                      确定性静态守卫 Guard Pattern (fos guard)
+                    </div>
+                    <CopyableCodeStrip text={detailNode.guard_pattern} />
+                  </section>
                 )}
 
                 {detailNode.guard_hint && (
-                  <div className="flex flex-col gap-1">
-                    <div className="text-xs font-medium text-muted-foreground">
+                  <section className="flex flex-col gap-1.5">
+                    <div className="text-[11px] font-medium tracking-wide text-muted-foreground">
                       守卫建议 Guard Test
                     </div>
-                    <div className="rounded-md border border-border bg-muted/40 p-2.5 text-xs text-foreground">
+                    <div className="rounded-lg border border-border/80 bg-muted/35 p-3 text-xs leading-relaxed text-foreground">
                       {detailNode.guard_hint}
                     </div>
-                  </div>
+                  </section>
                 )}
 
-                <div className="flex flex-col gap-1.5">
-                  <div className="text-xs font-medium text-muted-foreground">
-                    触发条件 (trigger_when)
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {(detailNode.trigger_when || []).map((t) => (
-                      <Badge key={t} variant="secondary" className="rounded-md text-xs">
-                        {t}
-                      </Badge>
-                    ))}
-                  </div>
-                </div>
+                {(detailNode.trigger_when || []).length > 0 && (
+                  <section className="flex flex-col gap-1.5">
+                    <div className="text-[11px] font-medium tracking-wide text-muted-foreground">
+                      触发条件 trigger_when
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(detailNode.trigger_when || []).map((t) => (
+                        <Badge key={t} variant="secondary" className="rounded-md text-xs font-normal">
+                          {t}
+                        </Badge>
+                      ))}
+                    </div>
+                  </section>
+                )}
 
                 <Separator />
 
-                <div className="flex flex-col gap-1.5">
-                  <div className="text-xs font-medium text-muted-foreground">
+                <section className="flex flex-col gap-2">
+                  <div className="text-[11px] font-medium tracking-wide text-muted-foreground">
                     双时态关系边 ({detailQuery.data?.graph?.length ?? 0})
                   </div>
                   {(detailQuery.data?.graph ?? []).length === 0 ? (
                     <div className="text-xs text-muted-foreground">无显式边</div>
                   ) : (
-                    <div className="flex flex-col gap-1 font-mono text-xs">
-                      {(detailQuery.data?.graph ?? []).map((e, i) => (
-                        <div key={i} className="text-foreground">
-                          {e.src_id}{" "}
-                          <span className="text-muted-foreground">--[{e.edge_type}]--&gt;</span>{" "}
-                          {e.dst_id}
-                        </div>
-                      ))}
+                    <div className="flex flex-col gap-1.5 font-mono text-xs">
+                      {(detailQuery.data?.graph ?? []).map((e, i) => {
+                        const targetClickable = nodeIdSet.has(e.dst_id) && e.dst_id !== detailNode.id
+                        return (
+                          <div
+                            key={i}
+                            className="flex flex-wrap items-center gap-1.5 rounded-md bg-muted/30 px-2.5 py-1.5 text-foreground"
+                          >
+                            <span>{e.src_id}</span>
+                            <IconArrowRight className="size-3 text-muted-foreground" />
+                            <Badge variant="outline" className="h-4 rounded-sm px-1.5 font-mono text-[10px]">
+                              {e.edge_type}
+                            </Badge>
+                            <IconArrowRight className="size-3 text-muted-foreground" />
+                            {targetClickable ? (
+                              <button
+                                type="button"
+                                onClick={() => onSelectNode(e.dst_id)}
+                                className="font-medium text-chart-1 underline-offset-2 hover:underline"
+                              >
+                                {e.dst_id}
+                              </button>
+                            ) : (
+                              <span>{e.dst_id}</span>
+                            )}
+                          </div>
+                        )
+                      })}
                     </div>
                   )}
-                </div>
+                </section>
 
                 <Separator />
 
-                <div className="flex flex-col gap-2">
-                  <div className="text-xs font-medium text-muted-foreground">
+                <section className="flex flex-col gap-2.5 pb-2">
+                  <div className="text-[11px] font-medium tracking-wide text-muted-foreground">
                     L2 不可变原始证据 ({detailQuery.data?.evidence?.length ?? 0})
                   </div>
-                  <ScrollArea className="max-h-96">
-                    <div className="flex flex-col gap-2.5 pr-2">
-                      {(detailQuery.data?.evidence ?? []).map((a) => (
-                        <div key={a.id} className="flex flex-col gap-1.5">
-                          <div className="font-mono text-xs text-muted-foreground">
-                            {a.id} · {a.source} · {a.ts}
-                          </div>
-                          <EvidenceBlock raw={a.raw} />
+                  <div className="flex flex-col gap-3">
+                    {(detailQuery.data?.evidence ?? []).map((a) => (
+                      <div key={a.id} className="flex flex-col gap-2">
+                        <div className="font-mono text-[11px] text-muted-foreground">
+                          {a.id} · {a.source} · {a.ts}
                         </div>
-                      ))}
-                    </div>
-                  </ScrollArea>
-                </div>
+                        <EvidenceBlock raw={a.raw} />
+                      </div>
+                    ))}
+                  </div>
+                </section>
               </div>
-            </>
+            </div>
           ) : (
-            <div className="py-10 text-center text-sm text-destructive">
+            <div className="flex flex-1 items-center justify-center p-10 text-center text-sm text-destructive">
               未能加载节点详情
             </div>
           )}
