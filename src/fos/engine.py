@@ -585,37 +585,64 @@ def query_snapshot_recall(
     top_score = final_ranked[0][1] if final_ranked else 0.0
     prune_tail = budget <= 1600
 
-    # Strict Token Budget Packing with Submodular Query-Term Coverage + Anti-Context-Rot Tail Cutoff
+    # Strict Token Budget Packing with Submodular Query-Term Coverage + Card-to-Card MMR + Anti-Context-Rot Tail Cutoff
     used_tokens = 0
     results: list[dict[str, Any]] = []
     q_terms_pack = extract_stemmed_terms(query)
     covered_terms: set[str] = set()
+    selected_term_sets: list[set[str]] = []
+    term_cache: dict[str, set[str]] = {
+        nid: extract_stemmed_terms(valid_map[nid].rule + " " + " ".join(valid_map[nid].entities))
+        for nid, _, _ in final_ranked
+    }
     remaining = list(final_ranked)
+
+    def _max_selected_jaccard(terms: set[str]) -> float:
+        if not terms or not selected_term_sets:
+            return 0.0
+        best_sim = 0.0
+        for sel in selected_term_sets:
+            if not sel:
+                continue
+            inter = len(terms & sel)
+            if inter:
+                sim = inter / len(terms | sel)
+                if sim > best_sim:
+                    best_sim = sim
+        return best_sim
 
     while remaining and len(results) < limit:
         uncovered = q_terms_pack - covered_terms
-        if not results or not q_terms_pack or not uncovered:
+        if not results:
             best_idx = 0
         else:
             best_idx = 0
             best_val = -1.0
             for idx, (cand_id, base_score, _cf) in enumerate(remaining[:12]):
-                cnode = valid_map[cand_id]
-                cand_terms = extract_stemmed_terms(cnode.rule + " " + " ".join(cnode.entities))
-                novel = uncovered & cand_terms
-                novel_boost = 1.0 + 0.6 * (len(novel) / max(1, len(uncovered)))
-                val = base_score * novel_boost
+                cand_terms = term_cache[cand_id]
+                if uncovered:
+                    novel = uncovered & cand_terms
+                    novel_boost = 1.0 + 0.6 * (len(novel) / max(1, len(uncovered)))
+                else:
+                    novel_boost = 1.0
+                max_sim = _max_selected_jaccard(cand_terms)
+                # MMR diversity multiplier: penalize cross-scope near-duplicates without clamping raw score
+                div_mult = max(0.25, 1.0 - 0.55 * max_sim) if max_sim > 0.15 else 1.0
+                val = base_score * novel_boost * div_mult
                 if val > best_val:
                     best_val = val
                     best_idx = idx
 
         nid, score, fresh = remaining.pop(best_idx)
         node = valid_map[nid]
-        cand_terms = extract_stemmed_terms(node.rule + " " + " ".join(node.entities))
+        cand_terms = term_cache[nid]
         cand_novel = uncovered & cand_terms
+        cand_max_sim = _max_selected_jaccard(cand_terms)
 
         # Anti-context-rot cutoff: stop stuffing low-relevance / redundant tail noise once core query is answered
         if prune_tail and results and top_score > 0:
+            if cand_max_sim >= 0.72 and not cand_novel:
+                continue
             if score < 0.24 * top_score:
                 continue
             if not cand_novel and score < 0.42 * top_score:
@@ -665,6 +692,7 @@ def query_snapshot_recall(
                 continue
         results.append(card)
         used_tokens += cost
+        selected_term_sets.append(cand_terms)
         if q_terms_pack:
             covered_terms |= q_terms_pack & cand_terms
 

@@ -20,7 +20,7 @@ fos ingest --from docs --limit 20 --json || true
 fos ingest --from all --since 48h --limit 25 --json || true
 
 # Run LLM-distilled dream + Reflect + TTL decay + 4-dimension Regression Gate
-if ! fos dream --reasoner cli --json; then
+if ! fos dream --reasoner cli --if-changed --json; then
   echo "[warn] LLM dream did not promote (gate blocked or CLI unavailable); keeping current snapshot untouched." >&2
 fi
 

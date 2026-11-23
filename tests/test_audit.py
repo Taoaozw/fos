@@ -199,3 +199,61 @@ def test_audit_reclassify_changes_priority_type_and_migrates_misscoped(tmp_path:
     new2 = engine.get(r2["result_node_id"])["node"]
     assert engine.get(n_migrate)["node"]["status"] == "superseded"
     assert new2["scope"] == "ssh-center"
+
+
+def test_audit_all_filters_domain_scopes_handles_repo_prefix_and_isolates_failures(tmp_path: Path) -> None:
+    from fos.audit import audit_all_repo_memories, list_auditable_repo_scopes
+
+    git_root = tmp_path / "repos"
+    git_root.mkdir()
+    for name in ("alpha", "beta"):
+        rdir = git_root / name
+        rdir.mkdir()
+        (rdir / ".git").mkdir()
+
+    engine = BrainEngine(tmp_path / "brain")
+    # Global & domain scopes MUST NOT be treated as local git repos
+    engine.add_atom(kind="principle", scope="global", content="保持最小改动", meta={"severity": "P0"})
+    engine.add_atom(kind="decision", scope="eng/frontend/shadcn", content="前端统一使用 shadcn Base UI", meta={"severity": "P1"})
+    # Repo with `repo/` prefix + plain repo + missing local checkout repo
+    n_alpha = engine.add_atom(kind="lesson", scope="repo/alpha", content="alpha 接口必须带幂等键", meta={"severity": "P1"})["node"]["id"]
+    engine.add_atom(kind="lesson", scope="beta", content="beta 队列消费者必须显式 ack", meta={"severity": "P1"})
+    engine.add_atom(kind="lesson", scope="ghost-repo", content="ghost 仓库本地未检出", meta={"severity": "P1"})
+
+    assert list_auditable_repo_scopes(engine) == ["alpha", "beta", "ghost-repo"]
+
+    seen_repos: list[str] = []
+
+    def _runner(*, repo_path: Path, **kwargs: Any) -> dict[str, Any]:
+        seen_repos.append(repo_path.name)
+        if repo_path.name == "beta":
+            raise RuntimeError("simulated codex timeout on beta")
+        return {
+            "findings": [
+                {
+                    "id": n_alpha,
+                    "verdict": "verified",
+                    "evidence": "src/api.py",
+                    "reason": "幂等键校验存在",
+                    "confidence": 0.95,
+                }
+            ]
+        }
+
+    report = audit_all_repo_memories(
+        engine,
+        root_dir=git_root,
+        concurrency=2,
+        stagger_s=0.0,
+        dry_run=False,
+        runner=_runner,
+    )
+    assert sorted(seen_repos) == ["alpha", "beta"]
+    assert report["audited_repos"] == 1
+    assert report["failed_repos"] == 1
+    assert report["skipped_repos"] == 1
+    assert report["skipped"][0]["scope"] == "ghost-repo"
+    assert report["skipped"][0]["reason"] == "repo_not_found"
+    assert report["failed"][0]["scope"] == "beta"
+    assert report["verified_refreshed"] == 1
+    assert engine.get(n_alpha)["node"]["verified_at"] != ""

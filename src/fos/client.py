@@ -677,16 +677,22 @@ class FosClient:
         *,
         dry_run: bool = False,
         no_gate: bool = False,
+        if_changed: bool = False,
         export_songe: Path | None = None,
         reasoner: str | None = None,
         cli_command: str | None = None,
     ) -> dict[str, Any]:
         if self.is_remote and export_songe is None and not reasoner:
-            return self._request("POST", "/v1/dream", json_body={"dry_run": dry_run, "no_gate": no_gate})
+            return self._request(
+                "POST",
+                "/v1/dream",
+                json_body={"dry_run": dry_run, "no_gate": no_gate, "if_changed": if_changed},
+            )
         return run_dream(
             self._engine(),
             dry_run=dry_run,
             no_gate=no_gate,
+            if_changed=if_changed,
             export_songe_path=export_songe,
             reasoner_override=reasoner,
             cli_command=cli_command,
@@ -881,6 +887,33 @@ class FosClient:
             self._engine(),
             scope=scope,
             repo_path=repo_path,
+            cli_command=cmd,
+            model=model,
+            effort=effort,
+            dry_run=dry_run,
+            timeout_s=timeout_s,
+        )
+
+    def audit_all(
+        self,
+        *,
+        root_dir: Path | None = None,
+        since_hours: int | None = None,
+        concurrency: int = 2,
+        cli_command: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        dry_run: bool = False,
+        timeout_s: int = 240,
+    ) -> dict[str, Any]:
+        from fos.audit import audit_all_repo_memories
+
+        cmd = cli_command or self.cfg.providers.cli_command or "codex exec"
+        return audit_all_repo_memories(
+            self._engine(),
+            root_dir=root_dir,
+            since_hours=since_hours,
+            concurrency=concurrency,
             cli_command=cmd,
             model=model,
             effort=effort,

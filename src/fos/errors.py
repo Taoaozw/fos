@@ -64,3 +64,8 @@ class AuthError(FosError):
 class OfflineError(FosError):
     exit_code = ExitCode.ERROR
     error_code = "offline"
+
+
+class DreamLockedError(FosError):
+    exit_code = ExitCode.ERROR
+    error_code = "dream_locked"

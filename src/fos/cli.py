@@ -299,6 +299,7 @@ def build_parser() -> _StrictArgumentParser:
     p_dream = sub.add_parser("dream", aliases=["dr"], help="Run sleep compilation + 4-gate eval + atomic switch")
     p_dream.add_argument("--dry-run", action="store_true")
     p_dream.add_argument("--no-gate", action="store_true")
+    p_dream.add_argument("--if-changed", action="store_true", help="Skip compilation immediately if ledger atoms have not changed since last promoted snapshot")
     p_dream.add_argument("--reasoner", type=str, default=None, choices=["auto", "heuristic", "cli", "mlx", "openai"], help="Override dream distiller backend")
     p_dream.add_argument("--cli-cmd", dest="cli_cmd", type=str, default=None, help="Override CLI reasoner command (e.g. 'codex exec' or 'claude -p')")
     p_dream.add_argument("--export-songe", type=str, default=None, help="Export cleaned experience stream for Songe MLX")
@@ -413,6 +414,10 @@ def build_parser() -> _StrictArgumentParser:
     )
     p_audit.add_argument("--scope", type=str, default=None, help="Repository scope to audit (auto-detected from cwd)")
     p_audit.add_argument("--repo", type=str, default=None, help="Explicit local repository path")
+    p_audit.add_argument("--all", dest="audit_all", action="store_true", help="Audit all active repository scopes (skipping global & domain scopes)")
+    p_audit.add_argument("--root", type=str, default=None, help="Root directory containing local git checkouts (used with --all)")
+    p_audit.add_argument("--since-hours", dest="since_hours", type=int, default=None, help="With --all, only audit repos with git commits within N hours")
+    p_audit.add_argument("--concurrency", type=int, default=2, help="With --all, max concurrent repo audits (1..6, default 2)")
     p_audit.add_argument("--model", type=str, default=None, help="Override coding agent model (e.g. gpt-6.2-sol)")
     p_audit.add_argument(
         "--effort",
@@ -614,6 +619,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             result = client.dream(
                 dry_run=args.dry_run,
                 no_gate=args.no_gate,
+                if_changed=args.if_changed,
                 export_songe=songe_path,
                 reasoner=args.reasoner,
                 cli_command=args.cli_cmd,
@@ -704,19 +710,32 @@ def run_cli(argv: list[str] | None = None) -> int:
             verdict = "useful" if args.useful else "noise"
             result = client.feedback(args.node_id, verdict, context=args.context)
         elif cmd == "audit":
-            scope = args.scope or _detect_git_project()
-            if not scope:
-                raise UsageError("Specify `--scope <repo>` or run `fos audit` inside a git repository.")
-            rpath = Path(args.repo).expanduser().resolve() if args.repo else None
-            result = client.audit(
-                scope=scope,
-                repo_path=rpath,
-                cli_command=args.cli_cmd,
-                model=args.model,
-                effort=args.effort,
-                dry_run=args.dry_run,
-                timeout_s=args.timeout,
-            )
+            if args.audit_all:
+                rdir = Path(args.root).expanduser().resolve() if args.root else None
+                result = client.audit_all(
+                    root_dir=rdir,
+                    since_hours=args.since_hours,
+                    concurrency=args.concurrency,
+                    cli_command=args.cli_cmd,
+                    model=args.model,
+                    effort=args.effort,
+                    dry_run=args.dry_run,
+                    timeout_s=args.timeout,
+                )
+            else:
+                scope = args.scope or _detect_git_project()
+                if not scope:
+                    raise UsageError("Specify `--scope <repo>`, `--all`, or run `fos audit` inside a git repository.")
+                rpath = Path(args.repo).expanduser().resolve() if args.repo else None
+                result = client.audit(
+                    scope=scope,
+                    repo_path=rpath,
+                    cli_command=args.cli_cmd,
+                    model=args.model,
+                    effort=args.effort,
+                    dry_run=args.dry_run,
+                    timeout_s=args.timeout,
+                )
         elif cmd == "pattern":
             from fos.code_pattern import detect_repo_stack_versions, parse_stack_param
 

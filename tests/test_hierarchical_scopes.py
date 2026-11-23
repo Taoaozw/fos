@@ -370,3 +370,40 @@ def test_dream_and_proposals_lub_scope_promotion_and_http_cli(
     narrowed = accept_proposal(engine, "prp_test_narrow_scope", scope="eng/frontend")
     assert narrowed["proposal"]["proposed_scope"] == "eng/frontend"
     assert engine.get(narrowed["result_node_id"], tier="L1")["node"]["scope"] == "eng/frontend"
+
+
+def test_recall_mmr_suppresses_cross_scope_near_duplicate_cards(tmp_path: Path) -> None:
+    engine = BrainEngine(tmp_path / "brain")
+    # Two near-identical cards across domain & repo scopes
+    n_domain = engine.add_atom(
+        kind="decision",
+        scope="eng/frontend/shadcn",
+        content="前端 UI 组件必须统一使用 shadcn Base UI 与语义主题 token，禁止手写原生控件和写死颜色。",
+        meta={"severity": "P1", "entities": ["shadcn", "base-ui", "tokens"]},
+    )["node"]["id"]
+    n_repo = engine.add_atom(
+        kind="decision",
+        scope="web-app",
+        content="前端 UI 组件必须统一使用 shadcn Base UI 与语义主题 token，禁止手写原生控件与写死颜色。",
+        meta={"severity": "P1", "entities": ["shadcn", "base-ui", "tokens"]},
+    )["node"]["id"]
+    # Complementary distinct card in the same scope family
+    n_comp = engine.add_atom(
+        kind="lesson",
+        scope="eng/frontend",
+        content="前端接口数据获取优先使用 TanStack Query 统一缓存与重试状态，避免在组件里手写裸 fetch。",
+        meta={"severity": "P1", "entities": ["tanstack-query", "fetch", "shadcn"]},
+    )["node"]["id"]
+
+    rec = engine.recall(
+        "前端 shadcn UI 组件与数据获取规范",
+        scope="web-app",
+        scopes=["eng/frontend/shadcn"],
+        budget=600,
+        limit=5,
+    )
+    ids = [r["id"] for r in rec["results"]]
+    # Near-duplicate pair should NOT both occupy tight budget when a complementary rule exists
+    assert not (n_domain in ids and n_repo in ids), f"Expected MMR to suppress cross-scope duplicate, got {ids}"
+    assert (n_domain in ids) or (n_repo in ids)
+    assert n_comp in ids

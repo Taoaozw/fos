@@ -12,6 +12,8 @@ import json
 import shlex
 import subprocess
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -26,6 +28,7 @@ from fos.proposals import (
     _proposal_fingerprint,
 )
 from fos.providers import _extract_json_object
+from fos.scopes import canonical_repo_name, scope_kind
 from fos.ulid import new_ulid
 
 AuditVerdict = Literal["verified", "drifted", "reclassify", "obsolete", "misscoped"]
@@ -342,40 +345,39 @@ def _enqueue_audit_proposals(
     return created
 
 
-def audit_repo_memories(
-    engine: BrainEngine,
+def _evaluate_repo_memories_readonly(
     *,
-    scope: str,
-    repo_path: Path | None = None,
-    cli_command: str = "codex exec",
-    model: str | None = None,
-    effort: str | None = None,
-    dry_run: bool = False,
-    timeout_s: int = 240,
-    runner: Callable[..., dict[str, Any] | None] | None = None,
-) -> dict[str, Any]:
-    """Audit all active memories of a single repository against its live codebase."""
-    clean_scope = scope.strip().lower()
-    resolved_repo = resolve_repo_path(clean_scope, repo_path)
-
-    with engine.snapshots.open_current(read_only=True) as db:
-        snap_ver = db.get_meta("snapshot_version", "unknown")
-        nodes = [n for n in db.list_nodes(as_of=None) if n.status == "active" and n.scope.lower() == clean_scope]
-
+    clean_scope: str,
+    resolved_repo: Path,
+    snap_ver: str,
+    nodes: list[CompiledNode],
+    cli_command: str,
+    model: str | None,
+    effort: str | None,
+    dry_run: bool,
+    timeout_s: int,
+    runner: Callable[..., dict[str, Any] | None] | None,
+) -> tuple[dict[str, Any], dict[str, CompiledNode]]:
+    """Run read-only codebase audit agent and parse findings without mutating BrainEngine state."""
     if not nodes:
-        return {
-            "scope": clean_scope,
-            "repo_path": str(resolved_repo),
-            "snapshot_version": snap_ver,
-            "model": model or "",
-            "effort": effort or "",
-            "dry_run": dry_run,
-            "audited_count": 0,
-            "summary": {v: 0 for v in VALID_AUDIT_VERDICTS},
-            "findings": [],
-            "verified_refreshed": 0,
-            "created_proposals": [],
-        }
+        return (
+            {
+                "scope": clean_scope,
+                "repo_path": str(resolved_repo),
+                "snapshot_version": snap_ver,
+                "cli_command": cli_command,
+                "model": model or "",
+                "effort": effort or "",
+                "dry_run": dry_run,
+                "audited_count": 0,
+                "total_repo_nodes": 0,
+                "summary": {v: 0 for v in VALID_AUDIT_VERDICTS},
+                "findings": [],
+                "verified_refreshed": 0,
+                "created_proposals": [],
+            },
+            {},
+        )
 
     node_map = {n.id: n for n in nodes}
     cards_payload = [
@@ -447,30 +449,243 @@ def audit_repo_memories(
             }
         )
 
-    verified_refreshed = 0
-    created_proposals: list[dict[str, Any]] = []
-    if not dry_run:
-        verified_ids = [f["id"] for f in findings if f["verdict"] == "verified"]
-        verified_refreshed = _refresh_verified_timestamps(engine, verified_ids)
-        created_proposals = _enqueue_audit_proposals(
-            engine,
-            scope=clean_scope,
-            node_map=node_map,
-            findings=findings,
+    return (
+        {
+            "scope": clean_scope,
+            "repo_path": str(resolved_repo),
+            "snapshot_version": snap_ver,
+            "cli_command": cli_command,
+            "model": model or "",
+            "effort": effort or "",
+            "dry_run": dry_run,
+            "audited_count": len(findings),
+            "total_repo_nodes": len(nodes),
+            "summary": summary,
+            "findings": findings,
+            "verified_refreshed": 0,
+            "created_proposals": [],
+        },
+        node_map,
+    )
+
+
+def _commit_repo_audit_findings(
+    engine: BrainEngine,
+    *,
+    clean_scope: str,
+    node_map: dict[str, CompiledNode],
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist verified timestamps and proposals on the calling thread (zero SQLite write contention)."""
+    findings = report.get("findings") or []
+    if not findings or not node_map:
+        return report
+    verified_ids = [f["id"] for f in findings if f["verdict"] == "verified"]
+    report["verified_refreshed"] = _refresh_verified_timestamps(engine, verified_ids)
+    report["created_proposals"] = _enqueue_audit_proposals(
+        engine,
+        scope=clean_scope,
+        node_map=node_map,
+        findings=findings,
+    )
+    return report
+
+
+def _load_active_repo_nodes(engine: BrainEngine, target_repo: str) -> tuple[str, list[CompiledNode]]:
+    canon = canonical_repo_name(target_repo)
+    with engine.snapshots.open_current(read_only=True) as db:
+        snap_ver = db.get_meta("snapshot_version", "unknown")
+        nodes = [
+            n
+            for n in db.list_nodes(as_of=None)
+            if n.status == "active"
+            and scope_kind(n.scope) == "repo"
+            and canonical_repo_name(n.scope) == canon
+        ]
+    return snap_ver, nodes
+
+
+def list_auditable_repo_scopes(engine: BrainEngine) -> list[str]:
+    """Return sorted canonical repository names that have active memories (excluding global & domain scopes)."""
+    repos: set[str] = set()
+    with engine.snapshots.open_current(read_only=True) as db:
+        for node in db.list_nodes(as_of=None):
+            if node.status != "active":
+                continue
+            if scope_kind(node.scope) != "repo":
+                continue
+            canon = canonical_repo_name(node.scope)
+            if canon:
+                repos.add(canon)
+    return sorted(repos)
+
+
+def _repo_has_recent_commits(repo_dir: Path, since_hours: int) -> bool:
+    """Return True if the git repository has at least one commit within `since_hours`."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_dir), "log", f"--since={int(since_hours)} hours ago", "-n", "1", "--oneline"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
         )
+        return proc.returncode == 0 and bool(proc.stdout.strip())
+    except Exception:
+        return True
+
+
+def audit_repo_memories(
+    engine: BrainEngine,
+    *,
+    scope: str,
+    repo_path: Path | None = None,
+    cli_command: str = "codex exec",
+    model: str | None = None,
+    effort: str | None = None,
+    dry_run: bool = False,
+    timeout_s: int = 240,
+    runner: Callable[..., dict[str, Any] | None] | None = None,
+) -> dict[str, Any]:
+    """Audit all active memories of a single repository against its live codebase."""
+    clean_scope = scope.strip().lower()
+    resolved_repo = resolve_repo_path(clean_scope, repo_path)
+    canon_scope = canonical_repo_name(clean_scope)
+    snap_ver, nodes = _load_active_repo_nodes(engine, canon_scope)
+
+    report, node_map = _evaluate_repo_memories_readonly(
+        clean_scope=canon_scope,
+        resolved_repo=resolved_repo,
+        snap_ver=snap_ver,
+        nodes=nodes,
+        cli_command=cli_command,
+        model=model,
+        effort=effort,
+        dry_run=dry_run,
+        timeout_s=timeout_s,
+        runner=runner,
+    )
+    if not dry_run:
+        _commit_repo_audit_findings(engine, clean_scope=canon_scope, node_map=node_map, report=report)
+    return report
+
+
+def audit_all_repo_memories(
+    engine: BrainEngine,
+    *,
+    root_dir: Path | None = None,
+    since_hours: int | None = None,
+    concurrency: int = 2,
+    stagger_s: float = 0.5,
+    cli_command: str = "codex exec",
+    model: str | None = None,
+    effort: str | None = None,
+    dry_run: bool = False,
+    timeout_s: int = 240,
+    runner: Callable[..., dict[str, Any] | None] | None = None,
+) -> dict[str, Any]:
+    """Audit all active repository scopes (skipping global & domain scopes) with bounded staggered concurrency."""
+    effective_concurrency = max(1, min(6, int(concurrency or 1)))
+    repo_scopes = list_auditable_repo_scopes(engine)
+    root_resolved = Path(root_dir).expanduser().resolve() if root_dir is not None else None
+
+    targets: list[tuple[str, Path, str, list[CompiledNode]]] = []
+    skipped: list[dict[str, str]] = []
+    for repo_name in repo_scopes:
+        resolved_repo: Path | None = None
+        if root_resolved is not None:
+            cand = root_resolved / repo_name
+            if (cand / ".git").exists():
+                resolved_repo = cand.resolve()
+        else:
+            try:
+                resolved_repo = resolve_repo_path(repo_name, None)
+            except UsageError:
+                resolved_repo = None
+
+        if resolved_repo is None or not (resolved_repo / ".git").exists():
+            skipped.append({"scope": repo_name, "reason": "repo_not_found"})
+            continue
+
+        if since_hours is not None and since_hours > 0 and not _repo_has_recent_commits(resolved_repo, since_hours):
+            skipped.append({"scope": repo_name, "repo_path": str(resolved_repo), "reason": "no_recent_commits"})
+            continue
+
+        snap_ver, nodes = _load_active_repo_nodes(engine, repo_name)
+        if not nodes:
+            skipped.append({"scope": repo_name, "repo_path": str(resolved_repo), "reason": "no_active_nodes"})
+            continue
+        targets.append((repo_name, resolved_repo, snap_ver, nodes))
+
+    audited_reports: list[dict[str, Any]] = []
+    failed: list[dict[str, str]] = []
+    total_summary: dict[str, int] = {v: 0 for v in VALID_AUDIT_VERDICTS}
+    total_verified_refreshed = 0
+    total_proposals = 0
+
+    def _run_one(idx: int, repo_name: str, resolved_repo: Path, snap_ver: str, nodes: list[CompiledNode]) -> tuple[str, Path, dict[str, Any], dict[str, CompiledNode]]:
+        if stagger_s > 0.0 and effective_concurrency > 1 and idx > 0:
+            time.sleep(stagger_s * min(idx, effective_concurrency - 1))
+        rep, nmap = _evaluate_repo_memories_readonly(
+            clean_scope=repo_name,
+            resolved_repo=resolved_repo,
+            snap_ver=snap_ver,
+            nodes=nodes,
+            cli_command=cli_command,
+            model=model,
+            effort=effort,
+            dry_run=dry_run,
+            timeout_s=timeout_s,
+            runner=runner,
+        )
+        return repo_name, resolved_repo, rep, nmap
+
+    if effective_concurrency == 1 or len(targets) <= 1:
+        for idx, (repo_name, resolved_repo, snap_ver, nodes) in enumerate(targets):
+            try:
+                _, _, rep, nmap = _run_one(idx, repo_name, resolved_repo, snap_ver, nodes)
+                if not dry_run:
+                    _commit_repo_audit_findings(engine, clean_scope=repo_name, node_map=nmap, report=rep)
+                audited_reports.append(rep)
+            except Exception as exc:
+                failed.append({"scope": repo_name, "repo_path": str(resolved_repo), "error": str(exc)})
+    else:
+        with ThreadPoolExecutor(max_workers=effective_concurrency) as pool:
+            future_meta = {
+                pool.submit(_run_one, idx, repo_name, resolved_repo, snap_ver, nodes): (repo_name, resolved_repo)
+                for idx, (repo_name, resolved_repo, snap_ver, nodes) in enumerate(targets)
+            }
+            for fut in as_completed(future_meta):
+                repo_name, resolved_repo = future_meta[fut]
+                try:
+                    _, _, rep, nmap = fut.result()
+                    if not dry_run:
+                        _commit_repo_audit_findings(engine, clean_scope=repo_name, node_map=nmap, report=rep)
+                    audited_reports.append(rep)
+                except Exception as exc:
+                    failed.append({"scope": repo_name, "repo_path": str(resolved_repo), "error": str(exc)})
+
+    audited_reports.sort(key=lambda r: str(r.get("scope") or ""))
+    failed.sort(key=lambda r: str(r.get("scope") or ""))
+    for rep in audited_reports:
+        for k in VALID_AUDIT_VERDICTS:
+            total_summary[k] += int((rep.get("summary") or {}).get(k, 0))
+        total_verified_refreshed += int(rep.get("verified_refreshed") or 0)
+        total_proposals += len(rep.get("created_proposals") or [])
 
     return {
-        "scope": clean_scope,
-        "repo_path": str(resolved_repo),
-        "snapshot_version": snap_ver,
-        "cli_command": cli_command,
-        "model": model or "",
-        "effort": effort or "",
+        "mode": "all",
+        "root_dir": str(root_resolved) if root_resolved is not None else "",
+        "since_hours": since_hours,
+        "concurrency": effective_concurrency,
         "dry_run": dry_run,
-        "audited_count": len(findings),
-        "total_repo_nodes": len(nodes),
-        "summary": summary,
-        "findings": findings,
-        "verified_refreshed": verified_refreshed,
-        "created_proposals": created_proposals,
+        "audited_repos": len(audited_reports),
+        "skipped_repos": len(skipped),
+        "failed_repos": len(failed),
+        "summary": total_summary,
+        "verified_refreshed": total_verified_refreshed,
+        "created_proposals_count": total_proposals,
+        "repos": audited_reports,
+        "skipped": skipped,
+        "failed": failed,
     }

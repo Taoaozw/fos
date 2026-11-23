@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 import re
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,7 @@ from fos.engine import (
     node_embedding_text,
     split_rule_and_rationale,
 )
-from fos.errors import GateFailedError
+from fos.errors import DreamLockedError, GateFailedError, UsageError
 from fos.eval_gate import evaluate_snapshot
 from fos.freshness import resolve_legacy_source_ref
 from fos.models import (
@@ -80,7 +82,7 @@ For `hindsight:docs:*` entries (sourced from AGENTS.md / GEMINI.md / FRONTEND.md
 - Drop boilerplate repo commands (like `make dev`, `npm test` listings) or temporary setup steps that are not design principles or engineering rules.
 
 When keep = true (STRICT L1 TOKEN BUDGET — anti-context-rot):
-- `rule`: MAX 1-2 crisp sentences (**<= 65 tokens / ~80 Chinese chars**). Actionable, timeless, no ticket IDs, no raw dumps. Preserve ALL exact technical flags and durable technical constants; if the raw input contains ANY prohibition/negation (`禁止`/`不要`/`不得`/`避免`/`never`/`avoid`/`must not`/`do not`), `rule` MUST explicitly include a Chinese negation word (`禁止`/`不要`/`避免`/`不得`) so negative guardrails are never silently lost!
+- `rule`: MAX 1-2 crisp sentences (**<= 65 tokens / ~80 Chinese chars**). Actionable, timeless, no ticket IDs, no raw dumps. Preserve ALL exact technical flags and durable technical constants; if the raw input contains ANY prohibition/negation (`禁止`/`不要`/`不得`/`避免`/`never`/`avoid`/`must not`/`do not`), `rule` MUST explicitly include a Chinese negation word (`禁止`/`不要`/`避免`/`不得`) so negative guardrails are never silently lost! Convert any relative dates (`昨天`/`上周`/`最近`/`yesterday`/`last week`/`recently`) to absolute `YYYY-MM-DD` dates anchored to the atom timestamp when timing matters, or drop ephemeral dates.
 - `rationale`: MAX 1 short sentence (**<= 35 tokens**): first-principles structural WHY.
 - `guard_hint`: MAX 1 short sentence (**<= 30 tokens**): mechanical lint/unit-test/CI check if enforceable, otherwise "".
 - `scope`: Pick the **Least Upper Bound (LUB)** scope (<= 3 levels; never over-promote to `global`):
@@ -307,6 +309,25 @@ def _apply_ttl_decay(
     return archived_count
 
 
+def _would_create_supersedes_cycle(
+    winner_id: str,
+    loser_id: str,
+    nodes_by_id: dict[str, CompiledNode],
+) -> bool:
+    """Return True if setting `loser.superseded_by = winner_id` would create a cycle."""
+    if winner_id == loser_id:
+        return True
+    cur: str | None = winner_id
+    visited: set[str] = {loser_id}
+    while cur:
+        if cur in visited:
+            return True
+        visited.add(cur)
+        node = nodes_by_id.get(cur)
+        cur = node.superseded_by if node else None
+    return False
+
+
 def _reflect_active_nodes(
     nodes_by_id: dict[str, CompiledNode],
     edges: list[GraphEdge],
@@ -376,6 +397,8 @@ def _reflect_active_nodes(
             loser = nodes_by_id[lose_id]
             if winner.status != "active" or loser.status != "active":
                 continue
+            if _would_create_supersedes_cycle(winner.id, loser.id, nodes_by_id):
+                continue
             loser.status = "superseded"
             loser.valid_until = winner.valid_from or ts_now
             loser.superseded_by = winner.id
@@ -413,7 +436,11 @@ def _reflect_active_nodes(
             target = nodes_by_id[tid]
             if target.status != "active":
                 continue
-            new_scope = str(act.get("new_scope") or target.scope).strip().lower() or target.scope
+            raw_scope = str(act.get("new_scope") or target.scope).strip() or target.scope
+            try:
+                new_scope = normalize_scope(raw_scope, strict=True)
+            except UsageError:
+                continue
             new_sev = str(act.get("new_severity") or "P1").strip().upper()
             if new_sev not in ("P1", "P2"):
                 new_sev = "P1"
@@ -845,107 +872,242 @@ def _compile_dream_nodes(
     return [nodes_by_id[nid] for nid in node_order], edges, stats
 
 
+_DREAM_LOCK_FILENAME = ".dream.lock"
+_DEFAULT_DREAM_LOCK_STALE_SECS = 1800
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Return True if a process with `pid` currently exists."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+class DreamLock:
+    """Atomic PID lock file guarding concurrent `fos dream` runs with stale/dead-PID auto-reclaim."""
+
+    def __init__(self, data_dir: Path, *, stale_secs: int = _DEFAULT_DREAM_LOCK_STALE_SECS) -> None:
+        self.path = Path(data_dir).resolve() / _DREAM_LOCK_FILENAME
+        self.stale_secs = max(1, int(stale_secs))
+        self._token: str | None = None
+
+    def _read_holder(self) -> tuple[int, float, str] | None:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return (
+                    int(raw.get("pid") or 0),
+                    float(raw.get("acquired_at") or 0.0),
+                    str(raw.get("token") or ""),
+                )
+        except Exception:
+            pass
+        try:
+            st = self.path.stat()
+            return (0, float(st.st_mtime), "")
+        except OSError:
+            return None
+
+    def _is_reclaimable(self, holder: tuple[int, float, str] | None) -> bool:
+        if holder is None:
+            return True
+        pid, acquired_at, _tok = holder
+        if pid <= 0 or not _is_pid_alive(pid):
+            return True
+        if acquired_at > 0.0 and (time.time() - acquired_at) >= self.stale_secs:
+            return True
+        return False
+
+    def acquire(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        token = uuid.uuid4().hex
+        payload = json.dumps(
+            {"pid": os.getpid(), "acquired_at": time.time(), "token": token},
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        for _attempt in range(2):
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                try:
+                    os.write(fd, payload)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                self._token = token
+                return
+            except FileExistsError:
+                holder = self._read_holder()
+                if self._is_reclaimable(holder):
+                    try:
+                        self.path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue
+                holder_pid = holder[0] if holder else 0
+                raise DreamLockedError(
+                    f"Another `fos dream` process is already running (pid={holder_pid}).",
+                    hint=f"Wait for pid {holder_pid} to finish, or remove {self.path} if it is stuck.",
+                    details={"lock_path": str(self.path), "holder_pid": holder_pid},
+                )
+
+        raise DreamLockedError(
+            "Could not acquire `fos dream` lock due to concurrent contention.",
+            hint=f"Retry shortly or inspect {self.path}.",
+            details={"lock_path": str(self.path)},
+        )
+
+    def release(self) -> None:
+        if not self._token:
+            return
+        token = self._token
+        self._token = None
+        holder = self._read_holder()
+        if holder is not None and holder[2] and holder[2] != token:
+            return
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def __enter__(self) -> DreamLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.release()
+
+
 def run_dream(
     engine: BrainEngine,
     *,
     dry_run: bool = False,
     no_gate: bool = False,
+    if_changed: bool = False,
     export_songe_path: Path | None = None,
     reasoner_override: str | None = None,
     cli_command: str | None = None,
+    lock_stale_secs: int = _DEFAULT_DREAM_LOCK_STALE_SECS,
 ) -> dict[str, Any]:
-    """Execute Quick Dream: Clean -> Distill -> Extract -> Consolidate -> Compile(vN+1) -> Regression Gate -> Atomic Switch."""
-    baseline_version = engine.snapshots.ensure_initialized()
-    atoms = engine.ledger.load_all_atoms()
+    """Execute Quick Dream: Lock -> Cheap Gate -> Clean -> Distill -> Extract -> Consolidate -> Compile(vN+1) -> Regression Gate -> Atomic Switch."""
+    with DreamLock(engine.data_dir, stale_secs=lock_stale_secs):
+        baseline_version = engine.snapshots.ensure_initialized()
+        atoms = engine.ledger.load_all_atoms()
+        cur_last_atom_id = atoms[-1].id if atoms else ""
 
-    active_reasoner: Reasoner = engine.providers.reasoner
-    override_bundle = None
-    if reasoner_override and reasoner_override != "auto":
-        pcfg = ProviderConfig(reasoner=reasoner_override)
-        if cli_command:
-            pcfg.cli_command = cli_command
-        override_bundle = build_providers(pcfg)
-        active_reasoner = override_bundle.reasoner
+        if if_changed and export_songe_path is None:
+            with engine.snapshots.open_version(baseline_version, read_only=True) as base_ro:
+                snap_atom_count = base_ro.get_meta("atom_count", "")
+                snap_last_atom_id = base_ro.get_meta("last_atom_id", "")
+            if snap_atom_count == str(len(atoms)) and snap_last_atom_id == cur_last_atom_id:
+                return {
+                    "promoted": False,
+                    "skipped": True,
+                    "skip_reason": "unchanged_ledger",
+                    "dry_run": dry_run,
+                    "baseline_version": baseline_version,
+                    "current_version": baseline_version,
+                    "atom_count": len(atoms),
+                    "last_atom_id": cur_last_atom_id,
+                }
 
-    try:
-        nodes, edges, stats = _compile_dream_nodes(engine, atoms, reasoner=active_reasoner)
-        cand_version, cand_path = engine.snapshots.create_candidate()
+        active_reasoner: Reasoner = engine.providers.reasoner
+        override_bundle = None
+        if reasoner_override and reasoner_override != "auto":
+            pcfg = ProviderConfig(reasoner=reasoner_override)
+            if cli_command:
+                pcfg.cli_command = cli_command
+            override_bundle = build_providers(pcfg)
+            active_reasoner = override_bundle.reasoner
 
-        texts = [node_embedding_text(n) for n in nodes]
-        embeddings = engine.providers.embedder.embed(texts) if texts else []
+        try:
+            nodes, edges, stats = _compile_dream_nodes(engine, atoms, reasoner=active_reasoner)
+            cand_version, cand_path = engine.snapshots.create_candidate()
 
-        with SnapshotDB(cand_path, embedding_dim=engine.providers.embedder.dim) as cand_db:
-            cand_db.set_meta("snapshot_version", cand_version)
-            cand_db.set_meta("embedding_model", engine.providers.embedder.model_name)
-            cand_db.set_meta("reasoner_model", active_reasoner.model_name)
-            cand_db.set_meta("built_at", now_iso())
-            cand_db.set_meta("atom_count", str(len(atoms)))
-            for node, emb in zip(nodes, embeddings):
-                cand_db.upsert_node(node, embedding=emb)
-            for edge in edges:
-                cand_db.add_edge(edge)
+            texts = [node_embedding_text(n) for n in nodes]
+            embeddings = engine.providers.embedder.embed(texts) if texts else []
 
-        gate_report: dict[str, Any] | None = None
-        if not no_gate:
-            with (
-                SnapshotDB(cand_path, embedding_dim=engine.providers.embedder.dim, read_only=True) as cand_ro,
-                engine.snapshots.open_version(baseline_version, read_only=True) as base_ro,
-            ):
-                gate_report = evaluate_snapshot(
-                    cand_ro,
-                    engine.ledger,
-                    engine.providers,
-                    suite="all",
-                    baseline_db=base_ro,
+            with SnapshotDB(cand_path, embedding_dim=engine.providers.embedder.dim) as cand_db:
+                cand_db.set_meta("snapshot_version", cand_version)
+                cand_db.set_meta("embedding_model", engine.providers.embedder.model_name)
+                cand_db.set_meta("reasoner_model", active_reasoner.model_name)
+                cand_db.set_meta("built_at", now_iso())
+                cand_db.set_meta("atom_count", str(len(atoms)))
+                cand_db.set_meta("last_atom_id", cur_last_atom_id)
+                for node, emb in zip(nodes, embeddings):
+                    cand_db.upsert_node(node, embedding=emb)
+                for edge in edges:
+                    cand_db.add_edge(edge)
+
+            gate_report: dict[str, Any] | None = None
+            if not no_gate:
+                with (
+                    SnapshotDB(cand_path, embedding_dim=engine.providers.embedder.dim, read_only=True) as cand_ro,
+                    engine.snapshots.open_version(baseline_version, read_only=True) as base_ro,
+                ):
+                    gate_report = evaluate_snapshot(
+                        cand_ro,
+                        engine.ledger,
+                        engine.providers,
+                        suite="all",
+                        baseline_db=base_ro,
+                    )
+
+            songe_exported = 0
+            if export_songe_path is not None:
+                songe_exported = export_songe_stream(nodes, engine, export_songe_path)
+
+            if gate_report is not None and not gate_report["passed"]:
+                rejected_path = engine.snapshots.discard(cand_version)
+                payload = {
+                    "promoted": False,
+                    "dry_run": dry_run,
+                    "baseline_version": baseline_version,
+                    "candidate_version": cand_version,
+                    "rejected_snapshot": str(rejected_path) if rejected_path else None,
+                    "stats": stats,
+                    "gate": gate_report,
+                }
+                raise GateFailedError(
+                    f"Dream candidate {cand_version} failed regression gate; kept {baseline_version}.",
+                    details=payload,
                 )
 
-        songe_exported = 0
-        if export_songe_path is not None:
-            songe_exported = export_songe_stream(nodes, engine, export_songe_path)
+            if dry_run:
+                engine.snapshots.discard(cand_version)
+                return {
+                    "promoted": False,
+                    "dry_run": True,
+                    "baseline_version": baseline_version,
+                    "candidate_version": cand_version,
+                    "stats": stats,
+                    "gate": gate_report,
+                    "songe_exported": songe_exported,
+                }
 
-        if gate_report is not None and not gate_report["passed"]:
-            rejected_path = engine.snapshots.discard(cand_version)
-            payload = {
-                "promoted": False,
-                "dry_run": dry_run,
-                "baseline_version": baseline_version,
-                "candidate_version": cand_version,
-                "rejected_snapshot": str(rejected_path) if rejected_path else None,
-                "stats": stats,
-                "gate": gate_report,
-            }
-            raise GateFailedError(
-                f"Dream candidate {cand_version} failed regression gate; kept {baseline_version}.",
-                details=payload,
-            )
-
-        if dry_run:
-            engine.snapshots.discard(cand_version)
+            state = engine.snapshots.promote(cand_version)
             return {
-                "promoted": False,
-                "dry_run": True,
+                "promoted": True,
+                "dry_run": False,
                 "baseline_version": baseline_version,
-                "candidate_version": cand_version,
+                "current_version": state["current"],
+                "history": state["history"],
                 "stats": stats,
                 "gate": gate_report,
                 "songe_exported": songe_exported,
             }
-
-        state = engine.snapshots.promote(cand_version)
-        return {
-            "promoted": True,
-            "dry_run": False,
-            "baseline_version": baseline_version,
-            "current_version": state["current"],
-            "history": state["history"],
-            "stats": stats,
-            "gate": gate_report,
-            "songe_exported": songe_exported,
-        }
-    finally:
-        if override_bundle is not None:
-            override_bundle.unload_heavy()
-        engine.providers.unload_heavy()
+        finally:
+            if override_bundle is not None:
+                override_bundle.unload_heavy()
+            engine.providers.unload_heavy()
 
 
 def export_songe_stream(nodes: list[CompiledNode], engine: BrainEngine, out_path: Path) -> int:

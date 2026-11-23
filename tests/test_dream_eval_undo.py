@@ -323,3 +323,109 @@ def test_dream_blocks_single_repo_chat_and_docs_from_self_promoting_to_global_p0
     assert global_node["scope"] == "global"
     assert global_node["type"] == "principle"
     assert global_node["severity"] == "P0"
+
+
+def test_dream_lock_blocks_live_holder_and_reclaims_dead_or_stale_lock(tmp_path: Path) -> None:
+    import json as _json
+    import os
+    import time
+
+    from fos.dream import DreamLock
+    from fos.errors import DreamLockedError
+
+    engine = BrainEngine(tmp_path / "brain")
+    engine.add_atom(kind="lesson", scope="fos", content="禁止无锁并发写候选快照")
+
+    # Live lock held by current PID blocks concurrent run_dream
+    with DreamLock(engine.data_dir):
+        with pytest.raises(DreamLockedError):
+            run_dream(engine)
+
+    # Dead PID lock is automatically reclaimed
+    lock_file = engine.data_dir / ".dream.lock"
+    lock_file.write_text(
+        _json.dumps({"pid": 99999999, "acquired_at": time.time(), "token": "dead"}),
+        encoding="utf-8",
+    )
+    res_dead = run_dream(engine)
+    assert res_dead["promoted"] is True
+    assert not lock_file.exists()
+
+    # Stale lock (even with live PID) is reclaimed once age >= stale_secs
+    lock_file.write_text(
+        _json.dumps({"pid": os.getpid(), "acquired_at": time.time() - 7200, "token": "stale"}),
+        encoding="utf-8",
+    )
+    res_stale = run_dream(engine, lock_stale_secs=60)
+    assert res_stale["promoted"] is True
+    assert not lock_file.exists()
+
+
+def test_dream_if_changed_skips_unchanged_and_runs_after_new_atom(tmp_path: Path) -> None:
+    engine = BrainEngine(tmp_path / "brain")
+    engine.add_atom(kind="lesson", scope="fos", content="首次写入触发编译")
+
+    first = run_dream(engine, if_changed=True)
+    assert first["promoted"] is True
+    v1 = first["current_version"]
+
+    # No new atoms -> short-circuits immediately without bumping snapshot version
+    skipped = run_dream(engine, if_changed=True)
+    assert skipped["promoted"] is False
+    assert skipped["skipped"] is True
+    assert skipped["skip_reason"] == "unchanged_ledger"
+    assert skipped["current_version"] == v1
+
+    # Adding a new atom invalidates the gate -> next if_changed run compiles & promotes
+    engine.add_atom(kind="decision", scope="fos", content="新增决策后重新触发睡眠编译")
+    second = run_dream(engine, if_changed=True)
+    assert second["promoted"] is True
+    assert second["current_version"] != v1
+
+
+def test_reflect_rejects_invalid_demote_scope_and_supersedes_cycle(tmp_path: Path) -> None:
+    from fos.dream import _reflect_active_nodes, _would_create_supersedes_cycle
+    from fos.models import CompiledNode
+
+    class _BadReflectReasoner:
+        @property
+        def model_name(self) -> str:
+            return "mock:bad-reflect"
+
+        def complete_json(self, prompt: str, *, system: str = "") -> dict | None:
+            return {
+                "actions": [
+                    {
+                        "action": "demote",
+                        "target_id": "DEC-001",
+                        "new_scope": "eng/frontend/react/hooks/too-deep",  # >3 segments, invalid!
+                        "new_severity": "P2",
+                        "reason": "too deep scope",
+                    },
+                    {
+                        "action": "demote",
+                        "target_id": "DEC-002",
+                        "new_scope": "eng/frontend/react",  # valid 3-level scope
+                        "new_severity": "P1",
+                        "reason": "valid domain demote",
+                    },
+                ]
+            }
+
+        def unload(self) -> None:
+            return
+
+    n1 = CompiledNode(id="DEC-001", type="decision", scope="global", severity="P1", rule="规则一", valid_from="2026-11-01T00:00:00Z")
+    n2 = CompiledNode(id="DEC-002", type="decision", scope="global", severity="P1", rule="规则二", valid_from="2026-11-02T00:00:00Z")
+    nodes = {"DEC-001": n1, "DEC-002": n2}
+
+    stats = _reflect_active_nodes(nodes, [], _BadReflectReasoner(), tmp_path, pinned_ids=set())
+    # Invalid 5-level scope rejected fail-closed; valid 3-level scope applied
+    assert n1.scope == "global"
+    assert n2.scope == "eng/frontend/react"
+    assert stats["reflect_demoted"] == 1
+
+    # Cycle guard detects transitive cycle A -> B -> A
+    n1.superseded_by = "DEC-002"
+    assert _would_create_supersedes_cycle("DEC-001", "DEC-002", nodes) is True
+    assert _would_create_supersedes_cycle("DEC-002", "DEC-001", nodes) is False

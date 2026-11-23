@@ -61,6 +61,7 @@ class MirrorRequest(BaseModel):
 class DreamRequest(BaseModel):
     dry_run: bool = False
     no_gate: bool = False
+    if_changed: bool = False
 
 
 class EvalRequest(BaseModel):
@@ -408,7 +409,7 @@ def create_app(
     @app.post("/v1/dream", dependencies=[Depends(require_auth)])
     def dream(req: DreamRequest) -> dict[str, Any]:
         try:
-            return run_dream(brain, dry_run=req.dry_run, no_gate=req.no_gate)
+            return run_dream(brain, dry_run=req.dry_run, no_gate=req.no_gate, if_changed=req.if_changed)
         except FosError as exc:
             raise _http_from_fos_error(exc) from exc
 
