@@ -93,18 +93,11 @@ export function buildManualCommands(
   const ver = (cliVersion ?? "").trim() || "0.1.0"
   const wheelPath = `/tmp/fos-${ver}-py3-none-any.whl`
   return [
-    "# 1. 确保已安装 uv（若未安装请先运行: curl -LsSf https://astral.sh/uv/install.sh | sh）",
     `curl -fsSL -H "Authorization: Bearer ${tok}" "${url}/v1/cli/download" -o ${wheelPath}`,
     `uv tool install --force --reinstall ${wheelPath}`,
-    "",
-    "# 2. 绑定大脑地址与 Token，并拉取离线缓存",
     `fos init --brain ${shellArg(url)} --token ${tokArg}`,
     "fos sync",
-    "",
-    "# 3. 安装内嵌 AI Skill（自动识别 ~/.claude ~/.codex ~/.cursor ~/.gemini 等目录）",
     "fos skill install",
-    "",
-    "# 4. 验证连通性与 L0 红线加载",
     "fos status",
     "fos boot",
   ].join("\n")
@@ -115,13 +108,8 @@ export function buildCurlExamples(brainUrl: string, token?: string): string {
   const url = normalizeBrainUrl(brainUrl)
   const tok = resolveToken(token)
   return [
-    `# 检查大脑健康状态`,
     `curl -fsSL "${url}/v1/health"`,
-    "",
-    `# 读取会话启动 L0 红线（<=300 tokens）`,
     `curl -fsSL -H "Authorization: Bearer ${tok}" "${url}/v1/boot?budget=300"`,
-    "",
-    `# 检索相关记忆`,
     `curl -fsSL -H "Authorization: Bearer ${tok}" "${url}/v1/recall?q=deploy&budget=900"`,
   ].join("\n")
 }
@@ -130,14 +118,9 @@ export function buildCurlExamples(brainUrl: string, token?: string): string {
 export function buildRemoteIngestManualCommands(gitRoot?: string): string {
   const root = resolveGitRoot(gitRoot)
   return [
-    "# 扫描本机 AI 会话（claude / codex / antigravity / pi 等，自动增量游标去重）",
     "fos ingest --from all --since 48h --json",
-    "",
-    `# 扫描本机代码仓库中的 fix/revert/perf 提交与项目文档（按需修改目录）`,
     `fos ingest --from git --root ${root} --since 48h --limit 30 --json`,
     `fos ingest --from docs --root ${root} --limit 30 --json`,
-    "",
-    "# 冲刷离线 outbox 并拉取最新快照（无需在客户端跑 fos dream，M3 Max 大脑每晚统一编译）",
     "fos sync --json",
   ].join("\n")
 }
@@ -197,19 +180,12 @@ export function buildRemoteIngestCronCommand(gitRoot?: string): string {
 /** Unbind remote brain only (keeps fos CLI installed, clears token/cache & stops scheduled ingest). */
 export function buildUnbindOnlyCommands(): string {
   return [
-    "# 1. 先冲刷本地未上传的离线 outbox（若大脑已不可达可跳过）",
     "fos sync --json || true",
-    "",
-    "# 2. 停用并移除本机定时采集任务（macOS launchd / Linux cron）",
     `launchctl unload ~/Library/LaunchAgents/${CLIENT_INGEST_LABEL}.plist 2>/dev/null || true`,
     `rm -f ~/Library/LaunchAgents/${CLIENT_INGEST_LABEL}.plist ~/.fos/bin/fos-client-ingest.sh`,
     "(crontab -l 2>/dev/null | grep -v '# fos-client-ingest' | crontab -) 2>/dev/null || true",
-    "",
-    "# 3. 清除远端大脑绑定配置（含明文 Token）与离线缓存",
     "rm -f ~/.fos/config.json",
     "rm -rf ~/.fos/cache",
-    "",
-    "# 4. 验证已解绑（应不再显示 brain_url）",
     "fos status --offline",
   ].join("\n")
 }
@@ -217,18 +193,11 @@ export function buildUnbindOnlyCommands(): string {
 /** Full uninstall on a remote device (unbind + remove AI skills + uninstall fos CLI + clean ~/.fos). */
 export function buildFullUninstallCommands(): string {
   return [
-    "# 1. 先冲刷本地未上传的离线 outbox（若大脑已不可达可跳过）",
     "fos sync --json || true",
-    "",
-    "# 2. 停用并移除本机定时采集任务（macOS launchd / Linux cron）",
     `launchctl unload ~/Library/LaunchAgents/${CLIENT_INGEST_LABEL}.plist 2>/dev/null || true`,
     `rm -f ~/Library/LaunchAgents/${CLIENT_INGEST_LABEL}.plist ~/.fos/bin/fos-client-ingest.sh`,
     "(crontab -l 2>/dev/null | grep -v '# fos-client-ingest' | crontab -) 2>/dev/null || true",
-    "",
-    "# 3. 移除已安装到各 AI 工具目录的 fos Skill",
     "rm -rf ~/.gemini/config/skills/fos ~/.claude/skills/fos ~/.codex/skills/fos ~/.agents/skills/fos ~/.cursor/skills/fos ~/.pi/agent/skills/fos",
-    "",
-    "# 4. 卸载 fos CLI 并清理本地配置与缓存",
     "uv tool uninstall fos || true",
     "rm -rf ~/.fos",
   ].join("\n")
