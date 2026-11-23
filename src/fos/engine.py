@@ -1258,6 +1258,20 @@ class BrainEngine:
         if not content or not content.strip():
             raise UsageError("Content must be non-empty.")
 
+        # Idempotent fast-path for retried outbox flushes (avoids redundant embedding/recompilation)
+        if atom_id:
+            existing_atom = self.ledger.get_atom(atom_id)
+            if existing_atom is not None:
+                return {
+                    "atom": existing_atom.to_dict(),
+                    "node": None,
+                    "superseded": None,
+                    "archived": None,
+                    "graduated": None,
+                    "snapshot_version": self.snapshots.current_version() or "v0001",
+                    "deduplicated": True,
+                }
+
         meta_clean = dict(meta or {})
         scope_clean = normalize_scope(scope, strict=source.startswith("manual"))
         raw_clean = content.strip()
@@ -1273,22 +1287,29 @@ class BrainEngine:
         if not is_lifecycle_op:
             with self.snapshots.open_current(read_only=True) as db:
                 existing_active = db.list_nodes(scope=None if scope_clean == "global" else scope_clean, as_of=None)
-            same_bucket = [n for n in existing_active if n.scope == scope_clean and n.type == kind]
+                same_bucket = [n for n in existing_active if n.scope == scope_clean and n.type == kind]
+                cached_vecs = db.get_node_vectors([n.id for n in same_bucket]) if same_bucket else {}
             if same_bucket:
                 probe_text = str(meta_clean.get("rule") or raw_clean)
-                texts = [probe_text] + [n.rule for n in same_bucket]
-                vecs = self.providers.embedder.embed(texts)
-                if len(vecs) == len(texts):
-                    surprise_info = evaluate_surprise(
-                        probe_text,
-                        vecs[0],
-                        list(zip(same_bucket, vecs[1:])),
-                    )
-                    if surprise_info["classification"] == "redundant" and not source.startswith("manual") and surprise_info["closest_node_id"]:
-                        # Low-surprise automated duplicate: reinforce existing card instead of duplicating
-                        meta_clean["reinforces"] = surprise_info["closest_node_id"]
-                    elif surprise_info["classification"] == "conflict" and surprise_info["closest_node_id"]:
-                        meta_clean["surprise_conflict_with"] = surprise_info["closest_node_id"]
+                probe_vecs = self.providers.embedder.embed([probe_text])
+                if probe_vecs:
+                    probe_vec = probe_vecs[0]
+                    probe_dim = len(probe_vec)
+                    missing_nodes = [
+                        n for n in same_bucket if len(cached_vecs.get(n.id) or ()) != probe_dim
+                    ]
+                    if missing_nodes:
+                        miss_vecs = self.providers.embedder.embed([n.rule for n in missing_nodes])
+                        for n, v in zip(missing_nodes, miss_vecs):
+                            cached_vecs[n.id] = v
+                    pairs = [(n, cached_vecs[n.id]) for n in same_bucket if n.id in cached_vecs]
+                    if pairs:
+                        surprise_info = evaluate_surprise(probe_text, probe_vec, pairs)
+                        if surprise_info["classification"] == "redundant" and not source.startswith("manual") and surprise_info["closest_node_id"]:
+                            # Low-surprise automated duplicate: reinforce existing card instead of duplicating
+                            meta_clean["reinforces"] = surprise_info["closest_node_id"]
+                        elif surprise_info["classification"] == "conflict" and surprise_info["closest_node_id"]:
+                            meta_clean["surprise_conflict_with"] = surprise_info["closest_node_id"]
 
         atom = LedgerAtom(
             id=atom_id or new_atom_id(),

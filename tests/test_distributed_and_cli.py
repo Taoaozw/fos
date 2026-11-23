@@ -165,5 +165,7 @@ def test_cli_contract_exit_codes_and_cold_start(tmp_path: Path, capsys: pytest.C
     t0 = time.perf_counter()
     proc = subprocess.run([sys.executable, "-m", "fos.cli", "--version"], capture_output=True, text=True, check=True)
     elapsed_ms = (time.perf_counter() - t0) * 1000
-    assert "fos 0.1.0" in proc.stdout
+    from fos import __version__
+
+    assert f"fos {__version__}" in proc.stdout
     assert elapsed_ms < 250

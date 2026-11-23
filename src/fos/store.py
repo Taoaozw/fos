@@ -550,6 +550,22 @@ class SnapshotDB:
         except sqlite3.OperationalError:
             return []
 
+    def get_node_vectors(self, node_ids: list[str]) -> dict[str, list[float]]:
+        """Return pre-computed embedding vectors stored in `node_vectors_raw` for the given node IDs."""
+        if not node_ids:
+            return {}
+        placeholders = ",".join("?" for _ in node_ids)
+        rows = self.conn.execute(
+            f"SELECT node_id, dim, embedding FROM node_vectors_raw WHERE node_id IN ({placeholders})",
+            node_ids,
+        ).fetchall()
+        out: dict[str, list[float]] = {}
+        for r in rows:
+            vec = _unpack_vec(r["embedding"])
+            if len(vec) == int(r["dim"]):
+                out[str(r["node_id"])] = vec
+        return out
+
     def search_vec(self, query_vec: list[float], *, limit: int = 30) -> list[tuple[str, float]]:
         if not query_vec:
             return []
