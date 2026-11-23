@@ -240,12 +240,12 @@ export function GraphPanel({ dashboard, onJumpToCard, themeVersion }: GraphPanel
   }
 
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex flex-col gap-2.5">
+    <div className="flex flex-col gap-3.5">
+      <div className="flex flex-col gap-3 rounded-xl border border-border bg-card px-4 py-3.5 shadow-xs">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="text-sm font-medium text-foreground">双时态知识图谱</h2>
-            <p className="text-xs text-muted-foreground">
+            <h2 className="text-[15px] font-semibold text-foreground">双时态知识图谱</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
               拖拽平移 · 按住 ⌘/Ctrl 滚轮缩放 · 悬停高亮 1-hop 演进与冲突邻域（显示 {filteredNodes.length} 节点 / {layout.edges.length} 语义边）
             </p>
           </div>
@@ -274,9 +274,9 @@ export function GraphPanel({ dashboard, onJumpToCard, themeVersion }: GraphPanel
         </div>
 
         {/* Interactive Toolbar */}
-        <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/70 pt-2.5">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="relative w-48">
+            <div className="relative w-52">
               <IconSearch className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input
                 value={search}
@@ -288,7 +288,9 @@ export function GraphPanel({ dashboard, onJumpToCard, themeVersion }: GraphPanel
 
             <Select value={scopeFilter} onValueChange={(v) => setScopeFilter(v ?? "__all__")}>
               <SelectTrigger size="sm" className="w-36 font-mono text-xs">
-                <SelectValue placeholder="Scope" />
+                <SelectValue>
+                  {(v: string | null) => (!v || v === "__all__" ? "全部 Scope" : v)}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__all__">全部 Scope</SelectItem>
@@ -368,7 +370,7 @@ export function GraphPanel({ dashboard, onJumpToCard, themeVersion }: GraphPanel
           onMouseMove={handleMouseMove}
           onMouseUp={stopDrag}
           onMouseLeave={stopDrag}
-          className={`relative h-[calc(100vh-230px)] min-h-[540px] overflow-hidden rounded-sm border border-border bg-card/40 select-none ${
+          className={`relative h-[calc(100dvh-250px)] min-h-[500px] overflow-hidden rounded-xl border border-border bg-card shadow-xs select-none ${
             dragging ? "cursor-grabbing" : "cursor-grab"
           }`}
         >
@@ -570,23 +572,23 @@ export function GraphPanel({ dashboard, onJumpToCard, themeVersion }: GraphPanel
 
         {/* Selected Node Inspector */}
         {selectedNode && (
-          <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-muted/30 px-4 py-3 text-sm">
+          <div className="flex flex-col gap-2.5 rounded-xl border border-border border-l-[3px] border-l-chart-1 bg-card px-4 py-3.5 text-sm shadow-xs">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="flex flex-col gap-1.5">
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <Badge variant="outline" className="rounded-md font-mono text-xs">
+                  <Badge variant="outline" className="rounded-sm font-mono text-xs font-medium">
                     {selectedNode.id}
                   </Badge>
                   <Badge
                     variant={selectedNode.severity === "P0" ? "destructive" : "secondary"}
-                    className="rounded-md font-mono text-xs"
+                    className="rounded-sm font-mono text-xs"
                   >
                     {selectedNode.severity}
                   </Badge>
                   <Badge variant="outline" className="rounded-md text-xs">
                     {selectedNode.type}
                   </Badge>
-                  <Badge variant="outline" className="rounded-md font-mono text-xs">
+                  <Badge variant="outline" className="rounded-md font-mono text-xs text-chart-1">
                     {selectedNode.scope}
                   </Badge>
                   {selectedNode.compat?.pattern === "code_exemplar" && (
@@ -603,21 +605,23 @@ export function GraphPanel({ dashboard, onJumpToCard, themeVersion }: GraphPanel
                     </Badge>
                   )}
                 </div>
-                <div className="text-foreground">{selectedNode.rule}</div>
+                <div className="text-[15px] font-semibold leading-snug text-foreground">
+                  {selectedNode.rule}
+                </div>
                 {selectedNode.source_ref && (
-                  <div className="font-mono text-xs text-muted-foreground break-all">
+                  <div className="font-mono text-xs break-words text-muted-foreground">
                     {selectedNode.source_ref}
                   </div>
                 )}
               </div>
-              <Button variant="outline" size="sm" onClick={() => onJumpToCard(selectedNode.id)}>
+              <Button size="sm" onClick={() => onJumpToCard(selectedNode.id)}>
                 查看 L2 证据与操作
                 <IconArrowUpRight className="size-3.5" />
               </Button>
             </div>
 
             {selectedEdges.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5 border-t border-border pt-2 text-xs">
+              <div className="flex flex-wrap items-center gap-1.5 border-t border-border/80 pt-2.5 text-xs">
                 <span className="text-muted-foreground">关联边 ({selectedEdges.length})：</span>
                 {selectedEdges.map((e, i) => {
                   const other = e.src_id === selectedNode.id ? e.dst_id : e.src_id

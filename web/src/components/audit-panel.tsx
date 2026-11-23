@@ -1,13 +1,18 @@
-import { useRef, useState } from "react"
+import { useMemo, useRef, useState } from "react"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
-import { IconMoonStars, IconShieldCheck } from "@tabler/icons-react"
+import {
+  IconChevronDown,
+  IconChevronUp,
+  IconMoonStars,
+  IconSearch,
+  IconShieldCheck,
+} from "@tabler/icons-react"
 import { toast } from "sonner"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Kbd } from "@/components/ui/kbd"
-import { ScrollArea } from "@/components/ui/scroll-area"
-import { Separator } from "@/components/ui/separator"
 import {
   Table,
   TableBody,
@@ -26,17 +31,29 @@ interface AuditPanelProps {
 
 export function AuditPanel({ dashboard }: AuditPanelProps) {
   const [evalReport, setEvalReport] = useState<EvalResponse | null>(null)
+  const [ledgerSearch, setLedgerSearch] = useState("")
+  const [expandedAtomIds, setExpandedAtomIds] = useState<Set<string>>(() => new Set())
   const queryClient = useQueryClient()
   const gatesRef = useRef<HTMLDivElement | null>(null)
   const ledgerRef = useRef<HTMLDivElement | null>(null)
+
+  const filteredAtoms = useMemo(() => {
+    const q = ledgerSearch.trim().toLowerCase()
+    if (!q) return dashboard.recent_atoms
+    return dashboard.recent_atoms.filter((atom) =>
+      `${atom.id} ${atom.kind} ${atom.scope} ${atom.source} ${atom.raw}`
+        .toLowerCase()
+        .includes(q)
+    )
+  }, [dashboard.recent_atoms, ledgerSearch])
 
   useRevealGroup(gatesRef, "[data-anim='gate']", [evalReport?.snapshot_version, evalReport?.passed], {
     y: 6,
     duration: 0.24,
   })
-  useRevealGroup(ledgerRef, "tbody tr", [dashboard.recent_atoms.length], {
+  useRevealGroup(ledgerRef, "tbody tr", [filteredAtoms.length], {
     y: 4,
-    duration: 0.22,
+    duration: 0.2,
     maxItems: 20,
   })
 
@@ -63,17 +80,29 @@ export function AuditPanel({ dashboard }: AuditPanelProps) {
     onError: (err: Error) => toast.error(`睡眠编译拦截/失败：${err.message}`),
   })
 
+  const toggleAtomExpand = (id: string) => {
+    setExpandedAtomIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
   return (
     <div className="flex flex-col gap-4">
-      <section className="flex flex-col gap-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
+      {/* Regression Gate & Dream Compiler */}
+      <section className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-xs">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-sm font-medium text-foreground">四维回归门禁与睡眠编译</h2>
-            <p className="text-xs text-muted-foreground">
+            <h2 className="text-[15px] font-semibold text-foreground">
+              四维回归门禁与睡眠编译
+            </h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
               Recall / Temporal / Fidelity / Behavior 自动守门，未通过则拦截上线并保留原快照
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
               size="sm"
@@ -93,9 +122,10 @@ export function AuditPanel({ dashboard }: AuditPanelProps) {
             </Button>
           </div>
         </div>
+
         <div>
           {!evalReport ? (
-            <Alert>
+            <Alert className="rounded-lg bg-muted/25">
               <IconShieldCheck className="size-4 text-muted-foreground" />
               <AlertDescription className="text-xs text-muted-foreground">
                 点击「运行四维门禁」实时验证当前快照 <Kbd>{dashboard.snapshot_version}</Kbd> 的四维回归指标。
@@ -106,36 +136,43 @@ export function AuditPanel({ dashboard }: AuditPanelProps) {
               <div className="flex flex-wrap items-center gap-2">
                 <Badge
                   variant={evalReport.passed ? "default" : "destructive"}
-                  className="rounded-sm font-mono text-xs"
+                  className="rounded-md font-mono text-xs"
                 >
                   {evalReport.passed ? "ALL GATES PASSED" : "GATE FAILED"}
                 </Badge>
-                <Badge variant="outline" className="rounded-sm font-mono text-xs">
+                <Badge variant="outline" className="rounded-md font-mono text-xs">
                   snap: {evalReport.snapshot_version}
                 </Badge>
-                <Badge variant="outline" className="rounded-sm font-mono text-xs">
+                <Badge variant="outline" className="rounded-md font-mono text-xs">
                   golden: {evalReport.golden_cases}
                 </Badge>
               </div>
-              <div ref={gatesRef} className="grid grid-cols-1 border-y border-border divide-y divide-border sm:grid-cols-2 lg:grid-cols-4 lg:divide-y-0 lg:divide-x">
+              <div
+                ref={gatesRef}
+                className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4"
+              >
                 {Object.entries(evalReport.gates).map(([name, metrics]) => (
                   <div
                     key={name}
                     data-anim="gate"
-                    className="flex flex-col gap-1.5 px-3 py-2.5"
+                    className={`flex flex-col gap-2 rounded-xl border border-border border-l-[3px] bg-background/60 px-3.5 py-3 ${
+                      metrics.passed ? "border-l-chart-2" : "border-l-destructive"
+                    }`}
                   >
                     <div className="flex items-center justify-between">
-                      <div className="font-mono text-xs font-medium uppercase text-muted-foreground">
+                      <div className="font-mono text-xs font-semibold uppercase text-foreground">
                         {name}
                       </div>
                       <Badge
                         variant={metrics.passed ? "outline" : "destructive"}
-                        className="rounded-sm font-mono text-xs"
+                        className={`h-5 rounded-sm font-mono text-[11px] ${
+                          metrics.passed ? "border-chart-2/40 text-chart-2" : ""
+                        }`}
                       >
                         {metrics.passed ? "PASS" : "FAIL"}
                       </Badge>
                     </div>
-                    <div className="font-mono text-xs text-foreground">
+                    <div className="font-mono text-xs leading-relaxed text-muted-foreground">
                       {name === "recall" &&
                         `Recall@5=${metrics.recall_at_5} · MRR=${metrics.mrr} (${metrics.cases} cases)`}
                       {name === "temporal" &&
@@ -153,83 +190,131 @@ export function AuditPanel({ dashboard }: AuditPanelProps) {
         </div>
       </section>
 
-      <Separator />
-
-      <section className="flex flex-col gap-2.5">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-sm font-medium text-foreground">
-            不可变原始账本时间线 (ledger/events-YYYY-MM.jsonl)
-          </h2>
-          <p className="font-mono text-xs text-muted-foreground">
-            Append-Only 唯一真相源 · 最近 {dashboard.recent_atoms.length} / {dashboard.counts.ledger_atoms} 条
-          </p>
+      {/* Immutable Ledger Timeline */}
+      <section className="flex flex-col overflow-hidden rounded-xl border border-border bg-card shadow-xs">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3.5">
+          <div>
+            <h2 className="text-[15px] font-semibold text-foreground">
+              不可变原始账本时间线
+            </h2>
+            <p className="mt-0.5 font-mono text-[11px] text-muted-foreground">
+              ledger/events-YYYY-MM.jsonl · Append-Only 唯一真相源 · 显示 {filteredAtoms.length} / {dashboard.counts.ledger_atoms} 条
+            </p>
+          </div>
+          <div className="relative w-64">
+            <IconSearch className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={ledgerSearch}
+              onChange={(e) => setLedgerSearch(e.target.value)}
+              placeholder="筛选账本 ID / scope / 原文..."
+              className="h-8 pl-8 text-xs"
+            />
+          </div>
         </div>
-        <div ref={ledgerRef}>
-        <ScrollArea className="h-[calc(100vh-290px)] min-h-[420px] border-y border-border">
-            <Table className="table-fixed">
-              <TableHeader>
-                <TableRow className="font-mono text-[11px] uppercase">
-                  <TableHead className="w-36">ID / Kind</TableHead>
-                  <TableHead className="w-40">Scope / Source</TableHead>
-                  <TableHead>Raw Content</TableHead>
-                  <TableHead className="w-44 pr-4 text-right">Timestamp</TableHead>
+
+        <div
+          ref={ledgerRef}
+          className="max-h-[calc(100dvh-21rem)] min-h-[420px] overflow-y-auto overscroll-contain"
+        >
+          <Table className="table-fixed">
+            <TableHeader className="sticky top-0 z-10 bg-card/95 backdrop-blur">
+              <TableRow className="font-mono text-[11px] uppercase">
+                <TableHead className="w-40 pl-5">ID / Kind</TableHead>
+                <TableHead className="w-40">Scope / Source</TableHead>
+                <TableHead>Raw Content</TableHead>
+                <TableHead className="w-40 pr-5 text-right">Timestamp</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filteredAtoms.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={4} className="py-12 text-center text-xs text-muted-foreground">
+                    没有匹配的账本记录
+                  </TableCell>
                 </TableRow>
-              </TableHeader>
-              <TableBody>
-                {dashboard.recent_atoms.map((atom) => {
+              ) : (
+                filteredAtoms.map((atom) => {
                   const redacted = Array.isArray(atom.meta?.redacted_types)
                     ? (atom.meta.redacted_types as string[])
                     : []
                   const evRef =
                     typeof atom.meta?.evidence_ref === "string" ? atom.meta.evidence_ref : ""
                   const compactTs = atom.ts.replace("T", " ").replace(/\.\d+/, "").slice(0, 19)
+                  const isLong = atom.raw.length > 220 || atom.raw.split("\n").length > 3
+                  const expanded = expandedAtomIds.has(atom.id)
+
                   return (
-                    <TableRow key={atom.id} className="align-top text-xs">
-                      <TableCell className="space-y-1">
-                        <div className="truncate font-mono text-foreground" title={atom.id}>
+                    <TableRow key={atom.id} className="align-top text-xs hover:bg-accent/30">
+                      <TableCell className="space-y-1.5 pl-5">
+                        <div className="truncate font-mono font-medium text-foreground" title={atom.id}>
                           {atom.id}
                         </div>
                         <div className="flex flex-wrap items-center gap-1">
-                          <Badge variant="secondary" className="rounded-sm font-mono text-[10px]">
+                          <Badge variant="secondary" className="h-4 rounded-sm px-1.5 font-mono text-[10px]">
                             {atom.kind}
                           </Badge>
                           {redacted.length > 0 && (
-                            <Badge variant="destructive" className="rounded-sm font-mono text-[10px]">
+                            <Badge variant="destructive" className="h-4 rounded-sm px-1.5 font-mono text-[10px]">
                               脱敏: {redacted.join(",")}
                             </Badge>
                           )}
                         </div>
                       </TableCell>
                       <TableCell className="space-y-1 font-mono text-[11px]">
-                        <div className="truncate text-foreground" title={atom.scope}>
+                        <div className="truncate font-medium text-chart-1" title={atom.scope}>
                           {atom.scope}
                         </div>
                         <div className="truncate text-muted-foreground" title={atom.source}>
                           {atom.source}
                         </div>
                         {evRef && (
-                          <div className="truncate text-muted-foreground" title={evRef}>
+                          <div className="truncate text-muted-foreground/80" title={evRef}>
                             {evRef}
                           </div>
                         )}
                       </TableCell>
                       <TableCell className="whitespace-normal">
-                        <div className="max-h-28 overflow-y-auto overflow-x-hidden break-words rounded-sm border border-border/70 bg-card/50 px-3 py-2 font-mono text-[13px] leading-6 whitespace-pre-wrap text-foreground">
-                          {atom.raw}
+                        <div className="rounded-lg border border-border/70 bg-muted/25 px-3 py-2">
+                          <div
+                            className={`break-words font-mono text-xs leading-relaxed whitespace-pre-wrap text-foreground ${
+                              isLong && !expanded ? "line-clamp-3" : ""
+                            }`}
+                          >
+                            {atom.raw}
+                          </div>
+                          {isLong && (
+                            <button
+                              type="button"
+                              onClick={() => toggleAtomExpand(atom.id)}
+                              className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-medium text-chart-1 hover:underline"
+                            >
+                              {expanded ? (
+                                <>
+                                  收起全文 <IconChevronUp className="size-3" />
+                                </>
+                              ) : (
+                                <>
+                                  展开全文 ({atom.raw.length} 字符) <IconChevronDown className="size-3" />
+                                </>
+                              )}
+                            </button>
+                          )}
                         </div>
                       </TableCell>
-                      <TableCell className="pr-4 text-right font-mono text-[11px] text-muted-foreground">
-                        <div title={atom.ts}>{compactTs}</div>
+                      <TableCell className="pr-5 text-right font-mono text-[11px] text-muted-foreground">
+                        <div className="text-foreground/80" title={atom.ts}>
+                          {compactTs}
+                        </div>
                         <div className="truncate" title={atom.device}>
                           {atom.device}
                         </div>
                       </TableCell>
                     </TableRow>
                   )
-                })}
-              </TableBody>
-            </Table>
-          </ScrollArea>
+                })
+              )}
+            </TableBody>
+          </Table>
         </div>
       </section>
     </div>

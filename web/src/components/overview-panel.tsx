@@ -1,6 +1,14 @@
 import { useMemo, useRef, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { IconArrowBackUp, IconArrowRight, IconBolt, IconCode } from "@tabler/icons-react"
+import {
+  IconArrowBackUp,
+  IconArrowRight,
+  IconArrowUpRight,
+  IconBolt,
+  IconCheck,
+  IconCode,
+  IconCopy,
+} from "@tabler/icons-react"
 import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -150,6 +158,7 @@ function SegmentedBar({
 
 export function OverviewPanel({ dashboard, onJumpToCard, onFilterCards }: OverviewPanelProps) {
   const [bootProject, setBootProject] = useState<string>("__global__")
+  const [copiedBoot, setCopiedBoot] = useState(false)
   const queryClient = useQueryClient()
   const rootRef = useRef<HTMLDivElement | null>(null)
   const matrixRef = useRef<HTMLDivElement | null>(null)
@@ -216,36 +225,44 @@ export function OverviewPanel({ dashboard, onJumpToCard, onFilterCards }: Overvi
       label: "活跃记忆 Active",
       value: c.active_nodes,
       sub: `总节点 ${c.total_nodes} · L1 均长 ${h?.avg_rule_tokens ?? "-"}t`,
+      accent: "border-l-chart-2",
       onClick: () => onFilterCards({ scope: "__all__", special: "all" }),
     },
     {
       label: "代码范式 Patterns",
       value: codePatterns,
       sub: "符号锚定 + SemVer 包络",
+      accent: "border-l-chart-1",
       onClick: () => onFilterCards({ scope: "__all__", special: "patterns" }),
     },
     {
       label: "原文指针覆盖",
       value: h ? `${h.pointer_coverage_pct}%` : "-",
       sub: `source_ref ${h?.pointer_nodes ?? 0} · 超胖 ${h?.bloated_nodes ?? 0}`,
+      accent: "border-l-chart-4",
       onClick: undefined,
     },
     {
       label: "抗腐化告警",
       value: alertsCount,
       sub: `漂移 ${h?.drifted_nodes ?? 0} · 断链 ${h?.broken_ref_nodes ?? 0}`,
+      accent: alertsCount > 0 ? "border-l-destructive" : "border-l-border",
+      highlight: alertsCount > 0 ? "text-destructive" : "",
       onClick: alertsCount > 0 ? () => onFilterCards({ scope: "__all__", special: "issues" }) : undefined,
     },
     {
       label: "不可变账本 Atoms",
       value: c.ledger_atoms,
       sub: `纠偏 ${c.superseded_nodes} · 归档 ${c.archived_nodes}`,
+      accent: "border-l-border",
       onClick: undefined,
     },
     {
       label: "待审推荐 Inbox",
       value: c.pending_proposals ?? 0,
       sub: `关系边 ${c.edges} · 金标 ${c.golden_cases}`,
+      accent: (c.pending_proposals ?? 0) > 0 ? "border-l-chart-3" : "border-l-border",
+      highlight: (c.pending_proposals ?? 0) > 0 ? "text-chart-3" : "",
       onClick: undefined,
     },
   ]
@@ -262,50 +279,76 @@ export function OverviewPanel({ dashboard, onJumpToCard, onFilterCards }: Overvi
   useMatrixWave(matrixRef, "[data-anim='dot']", [dashboard.snapshot_version, activeNodes.length])
   usePanelTransition(bootBoxRef, [bootProject, bootQuery.data?.kernel_text], { y: 4, duration: 0.2 })
 
+  const copyBootKernel = async () => {
+    const text = bootQuery.data?.kernel_text
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopiedBoot(true)
+      setTimeout(() => setCopiedBoot(false), 1500)
+    } catch {
+      toast.error("复制失败")
+    }
+  }
+
   return (
     <div ref={rootRef} className="flex flex-col gap-4">
-      {/* Hairline KPI telemetry strip */}
-      <div className="grid grid-cols-2 border-y border-border divide-y divide-border sm:grid-cols-3 lg:grid-cols-6 lg:divide-y-0 lg:divide-x">
+      {/* KPI Cards */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         {kpis.map((item) => (
           <div
             key={item.label}
             data-anim="kpi"
             onClick={item.onClick}
-            className={`flex flex-col justify-between gap-1 px-3.5 py-2.5 transition-colors ${
-              item.onClick ? "cursor-pointer hover:bg-accent/40" : ""
+            className={`group flex flex-col justify-between gap-1.5 rounded-xl border border-border border-l-[3px] bg-card px-4 py-3 shadow-xs transition-all ${
+              item.accent
+            } ${
+              item.onClick
+                ? "cursor-pointer hover:border-foreground/25 hover:bg-accent/25"
+                : ""
             }`}
           >
-            <div className="text-xs font-medium text-muted-foreground">{item.label}</div>
-            <KpiValue value={item.value} />
-            <div className="truncate text-xs text-muted-foreground">{item.sub}</div>
+            <div className="flex items-center justify-between gap-1 text-xs font-medium text-muted-foreground">
+              <span className="truncate">{item.label}</span>
+              {item.onClick && (
+                <IconArrowUpRight className="size-3.5 shrink-0 opacity-40 transition-opacity group-hover:opacity-100" />
+              )}
+            </div>
+            <div className={item.highlight ?? ""}>
+              <KpiValue value={item.value} />
+            </div>
+            <div className="truncate text-[11px] text-muted-foreground">{item.sub}</div>
           </div>
         ))}
       </div>
 
       {/* Signature TUI dot-matrix memory map */}
-      <div ref={matrixRef} className="border-b border-border pb-3.5">
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2 font-mono text-[11px]">
+      <div
+        ref={matrixRef}
+        className="rounded-xl border border-border bg-card px-4 py-3.5 shadow-xs"
+      >
+        <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2 font-mono text-[11px]">
           <div className="flex items-center gap-2">
-            <span className="font-medium text-foreground">MEMORY MATRIX</span>
+            <span className="font-semibold text-foreground">MEMORY MATRIX</span>
             <span className="text-muted-foreground">
               {activeNodes.length} active · {codePatterns} patterns · {alertsCount} alerts
             </span>
           </div>
           <div className="flex flex-wrap items-center gap-3 text-muted-foreground">
             <span className="inline-flex items-center gap-1">
-              <span className="size-1.5 rounded-[1px] bg-chart-4" /> principle
+              <span className="size-2 rounded-[2px] bg-chart-4" /> principle
             </span>
             <span className="inline-flex items-center gap-1">
-              <span className="size-1.5 rounded-[1px] bg-chart-1" /> pattern
+              <span className="size-2 rounded-[2px] bg-chart-1" /> pattern
             </span>
             <span className="inline-flex items-center gap-1">
-              <span className="size-1.5 rounded-[1px] bg-chart-2" /> decision
+              <span className="size-2 rounded-[2px] bg-chart-2" /> decision
             </span>
             <span className="inline-flex items-center gap-1">
-              <span className="size-1.5 rounded-[1px] bg-chart-3" /> lesson
+              <span className="size-2 rounded-[2px] bg-chart-3" /> lesson
             </span>
             <span className="inline-flex items-center gap-1">
-              <span className="size-1.5 rounded-[1px] bg-chart-5" /> alert
+              <span className="size-2 rounded-[2px] bg-chart-5" /> alert
             </span>
           </div>
         </div>
@@ -334,7 +377,7 @@ export function OverviewPanel({ dashboard, onJumpToCard, onFilterCards }: Overvi
                       data-anim="dot"
                       onClick={() => onJumpToCard(n.id)}
                       aria-label={`${n.id} ${n.rule}`}
-                      className={`size-2 cursor-pointer rounded-[2px] transition-transform hover:scale-150 ${dotColor}`}
+                      className={`size-2.5 cursor-pointer rounded-[2px] transition-transform hover:scale-150 ${dotColor}`}
                     />
                   }
                 />
@@ -354,11 +397,11 @@ export function OverviewPanel({ dashboard, onJumpToCard, onFilterCards }: Overvi
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-6 border-b border-border pb-4 lg:grid-cols-2 lg:divide-x lg:divide-border">
-        <section className="flex flex-col gap-3.5">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <section className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-xs">
           <div>
-            <h2 className="text-sm font-medium text-foreground">知识结构与健康度分布</h2>
-            <p className="text-xs text-muted-foreground">点击任意作用域条可直接下钻到 Cards 面板筛选</p>
+            <h2 className="text-[15px] font-semibold text-foreground">知识结构与健康度分布</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">点击任意作用域条可直接下钻到 Cards 面板筛选</p>
           </div>
           <div className="flex flex-col gap-3.5">
             <SegmentedBar title="知识构成 (Type & Patterns)" segments={typeSegments} />
@@ -376,12 +419,12 @@ export function OverviewPanel({ dashboard, onJumpToCard, onFilterCards }: Overvi
           </div>
         </section>
 
-        <section className="flex flex-col gap-3 lg:pl-6">
+        <section className="flex flex-col gap-3.5 rounded-xl border border-border bg-card p-5 shadow-xs">
           <div className="flex flex-col gap-1.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <IconBolt className="size-4 text-chart-2" />
-                <h2 className="flex items-center gap-2 text-sm font-medium text-foreground">
+                <h2 className="flex items-center gap-2 text-[15px] font-semibold text-foreground">
                   L0 唤醒核预览 <Kbd>fos boot</Kbd>
                 </h2>
               </div>
@@ -390,8 +433,12 @@ export function OverviewPanel({ dashboard, onJumpToCard, onFilterCards }: Overvi
                   value={bootProject}
                   onValueChange={(val) => setBootProject(val ?? "__global__")}
                 >
-                  <SelectTrigger size="sm" className="w-40 font-mono text-xs">
-                    <SelectValue placeholder="选择作用域" />
+                  <SelectTrigger size="sm" className="w-44 font-mono text-xs">
+                    <SelectValue>
+                      {(v: string | null) =>
+                        !v || v === "__global__" ? "全局 (global/P0)" : `project: ${v}`
+                      }
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__global__">全局 (global/P0)</SelectItem>
@@ -405,6 +452,20 @@ export function OverviewPanel({ dashboard, onJumpToCard, onFilterCards }: Overvi
                 <Badge variant="outline" className="rounded-sm font-mono text-xs">
                   {bootQuery.data ? `${bootUsed} / ${bootBudget}t` : "..."}
                 </Badge>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label="复制 L0 唤醒核"
+                  disabled={!bootQuery.data?.kernel_text}
+                  onClick={copyBootKernel}
+                >
+                  {copiedBoot ? (
+                    <IconCheck className="size-3.5 text-chart-2" />
+                  ) : (
+                    <IconCopy className="size-3.5" />
+                  )}
+                </Button>
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
@@ -427,7 +488,7 @@ export function OverviewPanel({ dashboard, onJumpToCard, onFilterCards }: Overvi
           <div className="flex flex-1 flex-col justify-between gap-3">
             <div
               ref={bootBoxRef}
-              className="overflow-x-auto rounded-sm border border-border bg-card/60 p-3.5 font-mono text-[13px] leading-6 whitespace-pre-wrap text-foreground"
+              className="overflow-x-auto rounded-lg border border-border/80 bg-muted/30 p-3.5 font-mono text-[13px] leading-6 whitespace-pre-wrap text-foreground"
             >
               {bootQuery.isLoading ? (
                 <div className="flex flex-col gap-2">
@@ -441,7 +502,7 @@ export function OverviewPanel({ dashboard, onJumpToCard, onFilterCards }: Overvi
               )}
             </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/80 pt-3">
               <div className="flex flex-wrap items-center gap-1.5">
                 <Badge variant="secondary" className="rounded-sm text-xs">
                   快照演进
@@ -480,13 +541,13 @@ export function OverviewPanel({ dashboard, onJumpToCard, onFilterCards }: Overvi
 
       {/* PlugMem Utility & Guardrail Analytics */}
       {dashboard.utility && (
-        <section className="flex flex-col gap-3">
+        <section className="flex flex-col gap-3.5 rounded-xl border border-border bg-card p-5 shadow-xs">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
-              <h2 className="text-sm font-medium text-foreground">
+              <h2 className="text-[15px] font-semibold text-foreground">
                 召回效用闭环 &amp; 确定性守卫分析 (PlugMem / Harness)
               </h2>
-              <p className="text-xs text-muted-foreground">
+              <p className="mt-0.5 text-xs text-muted-foreground">
                 追踪每次召回的真实命中、有用/噪声反馈与静态护栏硬拦截次数（点击条目跳转卡片）
               </p>
             </div>
@@ -494,7 +555,7 @@ export function OverviewPanel({ dashboard, onJumpToCard, onFilterCards }: Overvi
               <Badge variant="outline" className="font-mono text-xs">
                 命中 {dashboard.utility.total_recall_hits}
               </Badge>
-              <Badge variant="secondary" className="font-mono text-xs">
+              <Badge variant="secondary" className="font-mono text-xs text-chart-2">
                 有用 {dashboard.utility.total_useful}
               </Badge>
               <Badge variant="outline" className="font-mono text-xs">
@@ -519,11 +580,11 @@ export function OverviewPanel({ dashboard, onJumpToCard, onFilterCards }: Overvi
                 高价值卡片 Top Useful
               </div>
               {dashboard.utility.top_useful.length === 0 ? (
-                <div className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">
+                <div className="rounded-lg border border-dashed border-border p-3 text-xs text-muted-foreground">
                   暂无正反馈记录（可在 Cards 面板或 <Kbd>fos feedback</Kbd> 标记有用）
                 </div>
               ) : (
-                <div className="rounded-md border border-border">
+                <div className="overflow-hidden rounded-lg border border-border">
                   <Table>
                     <TableBody>
                       {dashboard.utility.top_useful.map((item) => (
@@ -532,7 +593,7 @@ export function OverviewPanel({ dashboard, onJumpToCard, onFilterCards }: Overvi
                           onClick={() => onJumpToCard(item.id)}
                           className="cursor-pointer text-xs"
                         >
-                          <TableCell className="w-24 font-mono text-foreground">
+                          <TableCell className="w-24 font-mono font-medium text-foreground">
                             {item.id}
                           </TableCell>
                           <TableCell className="max-w-0 truncate text-muted-foreground">
@@ -555,11 +616,11 @@ export function OverviewPanel({ dashboard, onJumpToCard, onFilterCards }: Overvi
                 高频低效噪声候选 Low Utility ({dashboard.utility.low_utility_count})
               </div>
               {dashboard.utility.low_utility_nodes.length === 0 ? (
-                <div className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">
+                <div className="rounded-lg border border-dashed border-border p-3 text-xs text-muted-foreground">
                   当前无低效噪声卡片
                 </div>
               ) : (
-                <div className="rounded-md border border-border">
+                <div className="overflow-hidden rounded-lg border border-border">
                   <Table>
                     <TableBody>
                       {dashboard.utility.low_utility_nodes.map((item) => (
@@ -568,7 +629,7 @@ export function OverviewPanel({ dashboard, onJumpToCard, onFilterCards }: Overvi
                           onClick={() => onJumpToCard(item.id)}
                           className="cursor-pointer text-xs"
                         >
-                          <TableCell className="w-24 font-mono text-foreground">
+                          <TableCell className="w-24 font-mono font-medium text-foreground">
                             {item.id}
                           </TableCell>
                           <TableCell className="max-w-0 truncate text-muted-foreground">
