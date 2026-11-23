@@ -58,7 +58,18 @@ class FosClient:
 
     @property
     def cursor_path(self) -> Path:
-        return self.cache_dir / "ingest_cursors.json"
+        db_path = (
+            self.cache_dir / "client_state.db"
+            if self.is_remote
+            else self.cfg.resolved_data_dir(self.home) / "state.db"
+        )
+        legacy = self.cache_dir / "ingest_cursors.json"
+        if legacy.is_file():
+            from fos.state_db import StateDB
+
+            with StateDB(db_path) as db:
+                db.migrate_legacy_cursors(legacy)
+        return db_path
 
     @property
     def is_remote(self) -> bool:

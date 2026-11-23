@@ -2,7 +2,7 @@
 
 Unified sidecar primitives (outside immutable `ledger/`):
 - Source-file freshness verification (`fresh` | `drifted` | `broken_ref` | `untracked`).
-- PlugMem-style Bayesian utility tracking (`usage_stats.json`: hits, useful, noise, guard_blocks).
+- PlugMem-style Bayesian utility tracking (`state.db` table `usage_stats`: hits, useful, noise, guard_blocks).
 - Titans-style surprise & conflict scoring on incoming memories (`redundant` | `conflict` | `novel`).
 """
 
@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fos.models import CompiledNode, now_iso
+from fos.state_db import StateDB
 from fos.tokens import extract_terms
 
 FreshnessState = Literal["fresh", "drifted", "broken_ref", "untracked"]
@@ -152,30 +153,16 @@ def resolve_legacy_source_ref(scope: str, source: str, meta: dict[str, Any]) -> 
 
 
 # ---------------------------------------------------------------------------
-# PlugMem-Inspired Utility Feedback Loop (sidecar usage_stats.json)
+# PlugMem-Inspired Utility Feedback Loop (SQLite `state.db` table `usage_stats`)
 # ---------------------------------------------------------------------------
 
 
 def load_usage_stats(data_dir: Path) -> dict[str, dict[str, Any]]:
-    path = Path(data_dir) / "usage_stats.json"
-    if not path.exists():
-        return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
+        with StateDB(Path(data_dir)) as db:
+            return db.load_usage_stats()
+    except Exception:
         return {}
-
-
-def _save_usage_stats(data_dir: Path, stats: dict[str, dict[str, Any]]) -> None:
-    path = Path(data_dir) / "usage_stats.json"
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(stats, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError:
-        pass
 
 
 def node_utility_score(entry: dict[str, Any] | None) -> float:
@@ -194,20 +181,21 @@ def utility_multiplier(entry: dict[str, Any] | None) -> float:
 
 
 def record_recall_hits(data_dir: Path, node_ids: list[str]) -> None:
-    """Increment lightweight sidecar recall counters (outside immutable ledger/)."""
+    """Increment lightweight SQLite recall counters (outside immutable ledger_atoms)."""
     if not node_ids:
         return
-    stats = load_usage_stats(data_dir)
     ts = now_iso()
-    for nid in node_ids:
-        entry = stats.get(nid)
-        if not isinstance(entry, dict):
-            entry = {"hits": 0, "useful": 0, "noise": 0, "guard_blocks": 0}
-        entry["hits"] = int(entry.get("hits", 0)) + 1
-        entry["last_hit_at"] = ts
-        entry["utility_score"] = node_utility_score(entry)
-        stats[nid] = entry
-    _save_usage_stats(data_dir, stats)
+    try:
+        with StateDB(Path(data_dir)) as db:
+            for nid in node_ids:
+                entry = db.get_usage_entry(nid) or {"hits": 0, "useful": 0, "noise": 0, "guard_blocks": 0}
+                entry["hits"] = int(entry.get("hits", 0)) + 1
+                entry["last_hit_at"] = ts
+                entry["utility_score"] = node_utility_score(entry)
+                db.upsert_usage_entry(nid, entry, commit=False)
+            db.conn.commit()
+    except Exception:
+        pass
 
 
 def record_utility_feedback(
@@ -218,30 +206,27 @@ def record_utility_feedback(
     context: str = "",
 ) -> dict[str, Any]:
     """Record explicit/implicit PlugMem utility feedback (`useful` | `noise` | `guard_block`)."""
-    stats = load_usage_stats(data_dir)
     ts = now_iso()
-    entry = stats.get(node_id)
-    if not isinstance(entry, dict):
-        entry = {"hits": 0, "useful": 0, "noise": 0, "guard_blocks": 0}
+    with StateDB(Path(data_dir)) as db:
+        entry = db.get_usage_entry(node_id) or {"hits": 0, "useful": 0, "noise": 0, "guard_blocks": 0}
 
-    if verdict == "useful":
-        entry["useful"] = int(entry.get("useful", 0)) + 1
-    elif verdict == "noise":
-        entry["noise"] = int(entry.get("noise", 0)) + 1
-    elif verdict == "guard_block":
-        entry["guard_blocks"] = int(entry.get("guard_blocks", 0)) + 1
-        entry["useful"] = int(entry.get("useful", 0)) + 1
-    else:
-        raise ValueError(f"Invalid feedback verdict: {verdict}")
+        if verdict == "useful":
+            entry["useful"] = int(entry.get("useful", 0)) + 1
+        elif verdict == "noise":
+            entry["noise"] = int(entry.get("noise", 0)) + 1
+        elif verdict == "guard_block":
+            entry["guard_blocks"] = int(entry.get("guard_blocks", 0)) + 1
+            entry["useful"] = int(entry.get("useful", 0)) + 1
+        else:
+            raise ValueError(f"Invalid feedback verdict: {verdict}")
 
-    entry["last_feedback_at"] = ts
-    entry["utility_score"] = node_utility_score(entry)
-    if context.strip():
-        notes = list(entry.get("recent_notes") or [])
-        notes.append({"ts": ts, "verdict": verdict, "context": context.strip()[:160]})
-        entry["recent_notes"] = notes[-5:]
-    stats[node_id] = entry
-    _save_usage_stats(data_dir, stats)
+        entry["last_feedback_at"] = ts
+        entry["utility_score"] = node_utility_score(entry)
+        if context.strip():
+            notes = list(entry.get("recent_notes") or [])
+            notes.append({"ts": ts, "verdict": verdict, "context": context.strip()[:160]})
+            entry["recent_notes"] = notes[-5:]
+        db.upsert_usage_entry(node_id, entry, commit=True)
     return {"node_id": node_id, "verdict": verdict, **entry}
 
 

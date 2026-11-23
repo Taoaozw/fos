@@ -247,3 +247,79 @@ def test_dream_scope_invariant_keeps_single_repo_local_and_elevates_cross_repo(t
     assert engine.get("LSN-001", tier="L1")["node"]["scope"] == "goto"
     assert engine.get("LSN-002", tier="L1")["node"]["scope"] == "global"
     assert engine.get("LSN-002", tier="L1")["node"]["seen_count"] == 2
+
+
+def test_dream_blocks_single_repo_chat_and_docs_from_self_promoting_to_global_p0(tmp_path: Path) -> None:
+    from fos.providers import LexicalReranker, LocalHashEmbedder, ProviderBundle
+
+    class _OverEagerPrincipleDistiller:
+        @property
+        def model_name(self) -> str:
+            return "mock:overeager-principle"
+
+        def complete_json(self, prompt: str, *, system: str = "") -> dict | None:
+            import json as _json
+
+            if "Review these active FlowOS memory cards" in prompt:
+                return {"actions": []}
+            batch = _json.loads(prompt[prompt.index("[") :])
+            return {
+                "items": [
+                    {
+                        "id": entry["id"],
+                        "keep": True,
+                        "kind": "principle",
+                        "scope": "global",
+                        "severity": "P0",
+                        "rule": entry["raw"].replace("Hindsight: ", ""),
+                        "rationale": "root cause",
+                        "trigger_when": ["trigger"],
+                    }
+                    for entry in batch
+                ]
+            }
+
+        def unload(self) -> None:
+            return
+
+    providers = ProviderBundle(embedder=LocalHashEmbedder(), reranker=LexicalReranker(), reasoner=_OverEagerPrincipleDistiller())
+    engine = BrainEngine(tmp_path / "brain", providers=providers)
+
+    # Single-repo Antigravity chat & repo docs MUST NOT self-promote to global P0 principle
+    engine.add_atom(
+        kind="lesson",
+        scope="fos",
+        source="hindsight:antigravity:conv-1",
+        content="Hindsight: 长期记忆用 source_ref 指向原文，不要复制全文",
+    )
+    engine.add_atom(
+        kind="decision",
+        scope="flowxy-gateway",
+        source="hindsight:docs:flowxy-gateway",
+        content="Hindsight: 网关热路径保持零拷贝和最小原语",
+    )
+    # Global user rules doc IS allowed to become global P0 principle
+    engine.add_atom(
+        kind="principle",
+        scope="global",
+        source="hindsight:docs:global:.gemini",
+        content="Hindsight: 采用最小局部改动，禁止修改无关模块",
+    )
+
+    res = run_dream(engine)
+    assert res["promoted"] is True
+
+    chat_node = engine.get("LSN-001", tier="L1")["node"]
+    assert chat_node["scope"] == "fos"
+    assert chat_node["type"] == "lesson"
+    assert chat_node["severity"] == "P1"
+
+    doc_node = engine.get("DEC-001", tier="L1")["node"]
+    assert doc_node["scope"] == "flowxy-gateway"
+    assert doc_node["type"] == "decision"
+    assert doc_node["severity"] == "P1"
+
+    global_node = engine.get("PRN-001", tier="L1")["node"]
+    assert global_node["scope"] == "global"
+    assert global_node["type"] == "principle"
+    assert global_node["severity"] == "P0"

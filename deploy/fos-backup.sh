@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# Daily private Git backup for FlowOS permanent & high-value text assets:
-#   - ledger/ (immutable append-only source of truth)
-#   - eval/ (golden regression assertions)
-#   - proposals.jsonl (governance inbox & dismissal cooldowns)
-#   - usage_stats.json (PlugMem recall utility telemetry)
-#   - distill_cache.json & proposal_scan_cache.json (zero-cost rebuild caches)
-# Never commits rebuildable SQLite snapshots, wheels, or credentials.
+# Daily private Git backup for FlowOS permanent SQLite state database (`state.db`):
+#   - state_backup.sql (deterministic SQL dump of ledger_atoms, eval_cases, proposals,
+#     usage_stats, distill_cache, proposal_scan_cache, snapshot pointer & ingest_cursors)
+# Never commits rebuildable SQLite binary snapshots, wheels, or credentials.
 set -euo pipefail
 
 FOS_HOME="${FOS_HOME:-$HOME/.fos}"
@@ -19,7 +16,7 @@ if [ ! -d "$BRAIN_DIR/.git" ]; then
 fi
 
 cat > "$BRAIN_DIR/.gitignore" <<'EOF'
-# Never commit rebuildable SQLite snapshots, wheels, or temporary files
+# Never commit binary SQLite files, rebuildable snapshots, wheels, or temporary files
 snapshots/
 dist/
 current.json
@@ -31,6 +28,14 @@ current.json
 EOF
 
 git -C "$BRAIN_DIR" add .gitignore
+
+if [ -f "$BRAIN_DIR/state.db" ]; then
+  sqlite3 "$BRAIN_DIR/state.db" .dump > "$BRAIN_DIR/state_backup.sql.tmp"
+  mv "$BRAIN_DIR/state_backup.sql.tmp" "$BRAIN_DIR/state_backup.sql"
+  git -C "$BRAIN_DIR" add state_backup.sql
+fi
+
+# Also keep any legacy text assets tracked if still present
 for item in ledger eval proposals.jsonl usage_stats.json distill_cache.json proposal_scan_cache.json; do
   if [ -e "$BRAIN_DIR/$item" ]; then
     git -C "$BRAIN_DIR" add "$item"

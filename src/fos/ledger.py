@@ -1,14 +1,14 @@
-"""Immutable append-only ledger (ledger/events-YYYY-MM.jsonl) and golden eval store."""
+"""Immutable experience ledger (`ledger_atoms`) and golden eval store (`eval_cases`) in SQLite `state.db`."""
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Iterator
 
 from fos.models import CompiledNode, EvalCase, LedgerAtom, now_iso
 from fos.redact import redact_secrets
+from fos.state_db import StateDB
 from fos.ulid import new_atom_id, new_ulid
 
 _CONSTRAINT_RE = re.compile(
@@ -18,22 +18,18 @@ _CONSTRAINT_RE = re.compile(
 
 
 class LedgerStore:
-    """Permanent source-of-truth append-only JSONL files under <data_dir>/ledger and <data_dir>/eval."""
+    """Permanent source-of-truth ledger & golden eval store backed by `<data_dir>/state.db`."""
 
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = Path(data_dir).resolve()
-        self.ledger_dir = self.data_dir / "ledger"
-        self.eval_dir = self.data_dir / "eval"
-        self.golden_path = self.eval_dir / "golden.jsonl"
-        self.ledger_dir.mkdir(parents=True, exist_ok=True)
-        self.eval_dir.mkdir(parents=True, exist_ok=True)
-
-    def _month_file(self, ts: str) -> Path:
-        ym = ts[:7] if len(ts) >= 7 and ts[4] == "-" else now_iso()[:7]
-        return self.ledger_dir / f"events-{ym}.jsonl"
+        self.db_path = self.data_dir / "state.db"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure schema & any legacy JSONL files are migrated eagerly on init
+        with StateDB(self.data_dir):
+            pass
 
     def append_atom(self, atom: LedgerAtom) -> LedgerAtom:
-        """Redact secrets and append an immutable atom line to its monthly shard."""
+        """Redact secrets and insert an immutable atom into SQLite `ledger_atoms`."""
         red = redact_secrets(atom.raw)
         clean_meta = dict(atom.meta)
         if red.had_secrets:
@@ -62,84 +58,43 @@ class LedgerStore:
         )
 
         # Deduplicate by atom id if already persisted (idempotent outbox flush)
-        if self.get_atom(clean_atom.id) is not None:
-            return clean_atom
-
-        path = self._month_file(clean_atom.ts)
-        line = json.dumps(clean_atom.to_dict(), ensure_ascii=False, separators=(",", ":")) + "\n"
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(line)
-            fh.flush()
-        return clean_atom
+        with StateDB(self.data_dir) as db:
+            if db.get_atom(clean_atom.id) is not None:
+                return clean_atom
+            return db.insert_atom(clean_atom)
 
     def iter_atoms(self) -> Iterator[LedgerAtom]:
-        """Iterate all atoms in chronological shard order."""
-        for path in sorted(self.ledger_dir.glob("events-*.jsonl")):
-            with path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        yield LedgerAtom.from_dict(json.loads(line))
-                    except (json.JSONDecodeError, KeyError):
-                        continue
+        """Iterate all atoms in chronological order."""
+        yield from self.load_all_atoms()
 
     def load_all_atoms(self) -> list[LedgerAtom]:
-        atoms = list(self.iter_atoms())
-        atoms.sort(key=lambda a: (a.ts, a.id))
-        return atoms
+        with StateDB(self.data_dir) as db:
+            return db.list_atoms()
 
     def get_atom(self, atom_id: str) -> LedgerAtom | None:
-        for atom in self.iter_atoms():
-            if atom.id == atom_id:
-                return atom
-        return None
+        with StateDB(self.data_dir) as db:
+            return db.get_atom(atom_id)
 
     def get_atoms_by_ids(self, atom_ids: list[str]) -> list[LedgerAtom]:
-        wanted = set(atom_ids)
-        if not wanted:
+        if not atom_ids:
             return []
-        by_id: dict[str, LedgerAtom] = {}
-        for atom in self.iter_atoms():
-            if atom.id in wanted:
-                by_id[atom.id] = atom
-                if len(by_id) == len(wanted):
-                    break
-        return [by_id[aid] for aid in atom_ids if aid in by_id]
+        with StateDB(self.data_dir) as db:
+            return db.get_atoms_by_ids(atom_ids)
 
-    # --- Golden eval store (append-only) ---
+    # --- Golden eval store ---
 
     def append_eval_case(self, case: EvalCase) -> EvalCase:
         if not case.id:
             case.id = f"evl_{new_ulid()}"
         if not case.created_at:
             case.created_at = now_iso()
-        line = json.dumps(case.to_dict(), ensure_ascii=False, separators=(",", ":")) + "\n"
-        with self.golden_path.open("a", encoding="utf-8") as fh:
-            fh.write(line)
-            fh.flush()
-        return case
+        with StateDB(self.data_dir) as db:
+            return db.upsert_eval_case(case)
 
     def load_eval_cases(self) -> list[EvalCase]:
-        """Load golden eval cases; later entries with the same id supersede earlier pin/state."""
-        if not self.golden_path.exists():
-            return []
-        by_id: dict[str, EvalCase] = {}
-        order: list[str] = []
-        with self.golden_path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    c = EvalCase.from_dict(json.loads(line))
-                except (json.JSONDecodeError, KeyError):
-                    continue
-                if c.id not in by_id:
-                    order.append(c.id)
-                by_id[c.id] = c
-        return [by_id[cid] for cid in order]
+        """Load golden eval cases in insertion order; later updates supersede earlier pin/state."""
+        with StateDB(self.data_dir) as db:
+            return db.list_eval_cases()
 
     def synthesize_cases_for_node(
         self,

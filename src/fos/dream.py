@@ -33,6 +33,7 @@ from fos.models import (
     parse_timestamp,
 )
 from fos.providers import Reasoner, build_providers
+from fos.state_db import StateDB
 from fos.store import SnapshotDB
 from fos.tokens import estimate_tokens, extract_terms, truncate_to_tokens
 
@@ -80,8 +81,8 @@ When keep = true (STRICT L1 TOKEN BUDGET — anti-context-rot):
 - `rule`: MAX 1-2 crisp sentences (**<= 65 tokens / ~80 Chinese chars**). Actionable, timeless, no ticket IDs, no raw dumps. Preserve ALL exact technical flags and durable technical constants; if the raw input contains ANY prohibition/negation (`禁止`/`不要`/`不得`/`避免`/`never`/`avoid`/`must not`/`do not`), `rule` MUST explicitly include a Chinese negation word (`禁止`/`不要`/`避免`/`不得`) so negative guardrails are never silently lost!
 - `rationale`: MAX 1 short sentence (**<= 35 tokens**): first-principles structural WHY.
 - `guard_hint`: MAX 1 short sentence (**<= 30 tokens**): mechanical lint/unit-test/CI check if enforceable, otherwise "".
-- `scope`: ALWAYS keep the input repo `scope` for any lesson mentioning repo/domain concepts (e.g. 渠道/供应商/适配器/金标用例/evidence_ids/具体接口). Use `"global"` ONLY for universal personal principles (`kind="principle"`) or OS/shell/git/engineering laws that apply identically to ANY repo with zero domain assumptions.
-- `severity`: P0 only for universal redlines or explicit user principles; P1 for generalizable engineering lessons/decisions; P2 for narrow repo-only constraints.
+- `scope`: ALWAYS keep the input repo `scope` for any lesson/decision mentioning repo/domain/product-specific concepts (e.g. 渠道/供应商/适配器/金标用例/evidence_ids/source_ref/长期记忆/蒸馏/具体接口). Use `"global"` ONLY for universal personal principles (`kind="principle"`) or OS/shell/git/engineering laws that apply identically to ANY repo with zero domain assumptions.
+- `severity`: P0 ONLY for universal cross-repo redlines or explicit global user principles that apply to EVERY project (NEVER for product/architecture design requirements of the current repo being built, such as memory-system `source_ref` or distillation rules — those are repo-scoped `decision`/`lesson` with `P1`); P1 for generalizable engineering lessons/decisions; P2 for narrow repo-only constraints.
 - `trigger_when`: 2-3 crisp situations when future AI should recall this before acting.
 
 Return STRICT JSON:
@@ -121,21 +122,24 @@ def _detect_contradiction(a: CompiledNode, b: CompiledNode) -> bool:
     return a_neg != b_neg
 
 
+def _resolve_state_dir(cache_path: Path) -> Path:
+    p = Path(cache_path)
+    return p.parent if p.suffix in (".json", ".db") else p
+
+
 def _load_distill_cache(cache_path: Path) -> dict[str, dict[str, Any]]:
-    if not cache_path.exists():
-        return {}
     try:
-        data = json.loads(cache_path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
+        with StateDB(_resolve_state_dir(cache_path)) as db:
+            return db.load_distill_cache()
     except Exception:
         return {}
 
 
 def _save_distill_cache(cache_path: Path, cache: dict[str, dict[str, Any]]) -> None:
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cache_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, cache_path)
+    if not cache:
+        return
+    with StateDB(_resolve_state_dir(cache_path)) as db:
+        db.upsert_distill_entries(cache)
 
 
 _L1_RULE_MAX_TOKENS = 95
@@ -420,7 +424,7 @@ def _compile_dream_nodes(
     distilled_map, distill_stats = _distill_hindsight_batch(
         cleaned,
         active_reasoner,
-        engine.data_dir / "distill_cache.json",
+        engine.data_dir,
     )
 
     counters: dict[str, int] = {}
@@ -499,14 +503,27 @@ def _compile_dream_nodes(
             if dist.get("kind") in VALID_KINDS:
                 atom_kind = dist["kind"]
             suggested_scope = str(dist.get("scope") or origin_scope).strip().lower()
-            # Guard invariant: a single-repo git fix commit NEVER self-promotes to global on first sight.
-            # Only explicit user principles (not from single-repo git) or cross-repo recurrence earn global scope.
-            if atom.source.startswith("hindsight:git:") and origin_scope != "global":
+            is_global_authority = (
+                atom.source.startswith("manual")
+                or atom.source.startswith("hindsight:docs:global")
+                or (origin_scope == "global" and atom.kind == "principle")
+            )
+            # Guard invariant: single-repo sources (git, repo docs, repo-scoped chats) NEVER self-promote
+            # to global P0 principles on first sight. Only global authority sources or cross-repo recurrence earn global scope.
+            demoted_from_principle = False
+            if origin_scope != "global" and not atom.source.startswith("manual"):
                 atom_scope = origin_scope
                 if atom_kind == "principle":
-                    atom_kind = "lesson"
+                    atom_kind = "decision" if atom.source.startswith("hindsight:docs:") else "lesson"
+                    demoted_from_principle = True
             elif atom_kind == "principle":
-                atom_scope = "global"
+                if is_global_authority:
+                    atom_scope = "global"
+                else:
+                    atom_scope = suggested_scope
+                    if atom_scope != "global":
+                        atom_kind = "lesson"
+                        demoted_from_principle = True
             elif origin_scope != "global" and suggested_scope == "global":
                 # Keep repo-bound lessons in their origin repo unless proven across multiple repos
                 atom_scope = origin_scope
@@ -520,7 +537,12 @@ def _compile_dream_nodes(
             if dist.get("entities"):
                 meta["entities"] = dist["entities"]
             if dist.get("severity"):
-                meta["severity"] = dist["severity"]
+                sev = str(dist["severity"])
+                if demoted_from_principle and sev.upper() == "P0":
+                    sev = "P1"
+                meta["severity"] = sev
+            elif demoted_from_principle and str(meta.get("severity", "")).upper() == "P0":
+                meta["severity"] = "P1"
         else:
             rule, rationale = split_rule_and_rationale(atom.raw)
             if meta.get("rule"):
@@ -725,7 +747,7 @@ def _compile_dream_nodes(
         nodes_by_id,
         edges,
         active_reasoner,
-        engine.data_dir / "distill_cache.json",
+        engine.data_dir,
         pinned_ids=pinned_ids,
     )
 

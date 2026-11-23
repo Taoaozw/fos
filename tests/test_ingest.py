@@ -219,3 +219,50 @@ def test_automated_hindsight_p0_does_not_mint_raw_golden_eval_cases(tmp_path: Pa
     cases = engine.ledger.load_eval_cases()
     assert len(cases) == 1
     assert cases[0].pinned is True
+
+
+def test_antigravity_scope_inference_and_non_redline_first_principles_demotion(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    cursor_path = tmp_path / "cursors.json"
+    agy_log = tmp_path / "agy" / "conv-fos" / ".system_generated" / "logs" / "transcript.jsonl"
+    agy_log.parent.mkdir(parents=True)
+    agy_log.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "PLANNER_RESPONSE",
+                        "content": "Checking /Users/demo/project/demo/fos/src/fos/dream.py",
+                        "created_at": ts,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "USER_INPUT",
+                        "content": "<USER_REQUEST>\n从第一性原理出发，现在新的这套长期记忆还要优化，大内容用 source_ref 指向原文\n</USER_REQUEST>",
+                        "created_at": ts,
+                    }
+                ),
+                json.dumps({"type": "PLANNER_RESPONSE", "content": "好的", "created_at": ts}),
+                json.dumps({"type": "PLANNER_RESPONSE", "content": "ok", "created_at": ts}),
+                json.dumps({"type": "PLANNER_RESPONSE", "content": "done", "created_at": ts}),
+                json.dumps(
+                    {
+                        "type": "USER_INPUT",
+                        "content": "<USER_REQUEST>\n[LSN-005] 禁止按整数截断。这些我感觉也是项目级别的啊？\n</USER_REQUEST>",
+                        "created_at": ts,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    events = collect_hindsight_events("antigravity", since="24h", root_dir=tmp_path / "agy", cursor_path=cursor_path)
+    assert len(events) == 2
+    for ev in events:
+        assert ev["scope"] == "fos"
+        assert ev["kind"] != "principle"
+        assert ev["meta"]["severity"] != "P0"

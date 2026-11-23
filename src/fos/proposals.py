@@ -1,13 +1,13 @@
 """Cross-project preference & governance Proposal Inbox for FlowOS.
 
 First-principles separation:
-- Machine scans produce typed, auditable Proposals stored in `<brain_data_dir>/proposals.jsonl`
-  (never polluting immutable `ledger/` until human approval).
+- Machine scans produce typed, auditable Proposals persisted in SQLite (`<brain_data_dir>/state.db`,
+  table `proposals`), never polluting immutable `ledger_atoms` until human approval.
 - Explicit 4-state lifecycle: `pending` -> `accepted` | `dismissed` | `expired`.
 - Accepting a proposal writes a normal `manual:proposal` LedgerAtom via BrainEngine
-  (with `SUPPORTS` or `SUPERSEDES` graph edges), keeping `ledger/` the single source of truth.
-- Dismissing records a stable fingerprint + evidence repo set so the scanner never nags twice
-  unless a brand-new owned repository introduces fresh corroborating evidence.
+  (with `SUPPORTS` or `SUPERSEDES` graph edges), keeping `ledger_atoms` the single source of truth.
+- Dismissing records a stable fingerprint + evidence repo set in SQLite so the scanner never nags
+  twice unless a brand-new owned repository introduces fresh corroborating evidence.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from fos.errors import ExitCode, FosError, NotFoundError, UsageError
 from fos.freshness import check_source_freshness, load_usage_stats, node_utility_score
 from fos.models import CompiledNode, VALID_KINDS, normalize_severity, now_iso, parse_timestamp
 from fos.providers import HeuristicReasoner, Reasoner
+from fos.state_db import StateDB
 from fos.tokens import estimate_tokens as count_tokens, tokenize_for_fts, truncate_to_tokens
 from fos.ulid import new_ulid
 
@@ -106,62 +107,35 @@ class Proposal:
 
 
 class ProposalStore:
-    """Append-only JSONL proposal log compacted by latest ID (outside immutable ledger/)."""
+    """SQLite-backed proposal & scan-cache store in `<brain_data_dir>/state.db`."""
 
     def __init__(self, brain_data_dir: Path) -> None:
         self.brain_data_dir = Path(brain_data_dir)
-        self.path = self.brain_data_dir / "proposals.jsonl"
-        self.cache_path = self.brain_data_dir / "proposal_scan_cache.json"
+        self.db_path = self.brain_data_dir / "state.db"
 
     def save(self, proposal: Proposal) -> Proposal:
-        self.brain_data_dir.mkdir(parents=True, exist_ok=True)
         proposal.updated_at = now_iso()
-        line = json.dumps(proposal.to_dict(), ensure_ascii=False, separators=(",", ":"))
-        with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
+        with StateDB(self.brain_data_dir) as db:
+            db.upsert_proposal_dict(proposal.to_dict())
         return proposal
 
     def load_all(self) -> list[Proposal]:
-        if not self.path.exists():
-            return []
-        by_id: dict[str, Proposal] = {}
-        order: list[str] = []
-        with self.path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                s = line.strip()
-                if not s:
-                    continue
-                try:
-                    p = Proposal.from_dict(json.loads(s))
-                except (json.JSONDecodeError, TypeError, KeyError):
-                    continue
-                if p.id not in by_id:
-                    order.append(p.id)
-                by_id[p.id] = p
-        return [by_id[pid] for pid in order]
+        with StateDB(self.brain_data_dir) as db:
+            return [Proposal.from_dict(d) for d in db.list_proposal_dicts()]
 
     def get(self, proposal_id: str) -> Proposal | None:
-        for p in self.load_all():
-            if p.id == proposal_id:
-                return p
-        return None
+        with StateDB(self.brain_data_dir) as db:
+            d = db.get_proposal_dict(proposal_id)
+            return Proposal.from_dict(d) if d is not None else None
 
     def load_cache(self) -> dict[str, Any]:
-        if not self.cache_path.exists():
-            return {}
-        try:
-            data = json.loads(self.cache_path.read_text(encoding="utf-8"))
+        with StateDB(self.brain_data_dir) as db:
+            data = db.get_kv("proposal_scan_cache", "state", {})
             return data if isinstance(data, dict) else {}
-        except (OSError, json.JSONDecodeError):
-            return {}
 
     def save_cache(self, data: dict[str, Any]) -> None:
-        self.brain_data_dir.mkdir(parents=True, exist_ok=True)
-        tmp = self.cache_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, self.cache_path)
+        with StateDB(self.brain_data_dir) as db:
+            db.set_kv("proposal_scan_cache", "state", data)
 
 
 # ---------------------------------------------------------------------------

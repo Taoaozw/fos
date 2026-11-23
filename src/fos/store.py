@@ -13,6 +13,7 @@ from typing import Any
 
 from fos.errors import NotFoundError
 from fos.models import CompiledNode, GraphEdge, is_valid_at, now_iso
+from fos.state_db import StateDB
 from fos.tokens import is_stopword, tokenize_for_fts
 
 SCHEMA_VERSION = "1"
@@ -600,26 +601,26 @@ class SnapshotDB:
 
 
 class SnapshotManager:
-    """Manages versioned SQLite snapshots under <data_dir>/snapshots/ with atomic current.json pointer."""
+    """Manages versioned SQLite snapshots under <data_dir>/snapshots/ with atomic pointer in state.db."""
 
     def __init__(self, data_dir: Path, *, embedding_dim: int = 256) -> None:
         self.data_dir = Path(data_dir).resolve()
         self.snapshots_dir = self.data_dir / "snapshots"
         self.rejected_dir = self.snapshots_dir / "rejected"
-        self.pointer_path = self.data_dir / "current.json"
         self.embedding_dim = embedding_dim
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
 
     def _read_pointer(self) -> dict[str, Any]:
-        if not self.pointer_path.exists():
+        with StateDB(self.data_dir) as db:
+            state = db.get_kv("snapshot", "pointer")
+        if not isinstance(state, dict):
             return {"current": None, "history": [], "updated_at": None}
-        return json.loads(self.pointer_path.read_text(encoding="utf-8"))
+        return state
 
     def _write_pointer_atomic(self, state: dict[str, Any]) -> None:
         state["updated_at"] = now_iso()
-        tmp = self.pointer_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, self.pointer_path)
+        with StateDB(self.data_dir) as db:
+            db.set_kv("snapshot", "pointer", state)
 
     def current_version(self) -> str | None:
         return self._read_pointer().get("current")

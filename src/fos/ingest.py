@@ -136,7 +136,17 @@ def _classify_chat_signal(text: str, *, role: str) -> tuple[str, str] | None:
     if _DECISION_RE.search(clean):
         return ("decision", "P1")
     if _TASTE_CORRECTION_RE.search(clean):
-        is_hard = any(w in clean.lower() for w in ("禁止", "严禁", "不要 mcp", "不要mcp", "never use", "第一性原理"))
+        low = clean.lower()
+        # Only short, direct non-question prohibitions qualify as P0 principle candidates at ingest time.
+        # Phrases like "第一性原理" or pasted card lists / questions are design discussions, not global redlines.
+        is_question_or_paste = clean.rstrip().endswith(("?", "？")) or bool(
+            re.search(r"\[(?:LSN|DEC|PRN|THT|OUT)-\d+\]", clean)
+        )
+        is_hard = (
+            not is_question_or_paste
+            and len(clean) <= 220
+            and any(w in low for w in ("禁止", "严禁", "不要 mcp", "不要mcp", "never use"))
+        )
         return ("principle" if is_hard else "lesson", "P0" if is_hard else "P1")
     return None
 
@@ -161,6 +171,11 @@ def _extract_text_from_message(msg: Any) -> str:
     return ""
 
 
+_WORKSPACE_PATH_RE = re.compile(
+    r"(?:/Users/([^/\"'\s]+)/|/home/([^/\"'\s]+)/)(?:project|projects|workspace|workspaces|repos|code)/([^\s\"'`,)}\]:]+)"
+)
+
+
 def _infer_scope_from_path(path_str: str) -> str:
     if not path_str:
         return "global"
@@ -171,7 +186,42 @@ def _infer_scope_from_path(path_str: str) -> str:
     return "global"
 
 
+def _infer_scope_from_text(text: str) -> str | None:
+    """Infer repo scope from workspace file paths referenced in Antigravity transcripts."""
+    if not text:
+        return None
+    for m in _WORKSPACE_PATH_RE.finditer(text):
+        user = (m.group(1) or m.group(2) or "").strip().lower()
+        rest = m.group(3).strip("/")
+        if not rest:
+            continue
+        full = Path(m.group(0))
+        # Prefer walking up to an actual .git root when the path exists on disk
+        if full.exists():
+            cur = full if full.is_dir() else full.parent
+            for parent in (cur, *cur.parents):
+                if (parent / ".git").exists():
+                    return parent.name.lower()
+        parts = [p for p in rest.split("/") if p]
+        if not parts:
+            continue
+        # Handle /Users/<user>/project/<user>/<repo>/... layout
+        if len(parts) >= 2 and parts[0].lower() == user:
+            return parts[1].lower()
+        return parts[0].lower()
+    return None
+
+
 def _load_cursors(cursor_path: Path) -> dict[str, Any]:
+    if cursor_path.suffix == ".db":
+        from fos.state_db import StateDB
+
+        try:
+            with StateDB(cursor_path) as db:
+                data = db.get_kv("ingest_cursors", "state", {})
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
     if not cursor_path.exists():
         return {}
     try:
@@ -181,6 +231,12 @@ def _load_cursors(cursor_path: Path) -> dict[str, Any]:
 
 
 def _save_cursors(cursor_path: Path, cursors: dict[str, Any]) -> None:
+    if cursor_path.suffix == ".db":
+        from fos.state_db import StateDB
+
+        with StateDB(cursor_path) as db:
+            db.set_kv("ingest_cursors", "state", cursors)
+        return
     cursor_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = cursor_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(cursors, indent=2) + "\n", encoding="utf-8")
@@ -614,6 +670,10 @@ def collect_hindsight_events(
                             session_scope = _infer_scope_from_path(str(obj["cwd"]))
                         if obj.get("id"):
                             session_id_hint = str(obj["id"])
+                    elif source == "antigravity" and session_scope == "global":
+                        inferred = _infer_scope_from_text(line_s)
+                        if inferred:
+                            session_scope = inferred
 
                     if line_no <= start_line:
                         continue
