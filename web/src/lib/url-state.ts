@@ -12,6 +12,7 @@ export const APP_TABS = [
   "graph",
   "playground",
   "audit",
+  "connect",
 ] as const
 export type AppTab = (typeof APP_TABS)[number]
 

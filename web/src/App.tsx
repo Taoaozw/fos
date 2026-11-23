@@ -14,6 +14,7 @@ import { Toaster, toast } from "sonner"
 import { AuditPanel } from "@/components/audit-panel"
 import { AuthGate } from "@/components/auth-gate"
 import { CardsPanel } from "@/components/cards-panel"
+import { ConnectPanel } from "@/components/connect-panel"
 import { GraphPanel } from "@/components/graph-panel"
 import { OverviewPanel } from "@/components/overview-panel"
 import { PlaygroundPanel } from "@/components/playground-panel"
@@ -252,6 +253,12 @@ export function App() {
                     {dashboardQuery.data.counts.ledger_atoms}
                   </span>
                 </TabsTrigger>
+                <TabsTrigger
+                  value="connect"
+                  className="h-full flex-none rounded-none px-3 font-medium text-muted-foreground transition-colors duration-200 hover:text-foreground data-active:text-foreground"
+                >
+                  多端接入
+                </TabsTrigger>
               </TabsList>
               {tabIndicator.ready && (
                 <span
@@ -412,6 +419,10 @@ export function App() {
 
             <TabsContent value="audit">
               <AuditPanel dashboard={dashboardQuery.data} />
+            </TabsContent>
+
+            <TabsContent value="connect">
+              <ConnectPanel health={healthQuery.data} token={token} />
             </TabsContent>
           </div>
         )}
