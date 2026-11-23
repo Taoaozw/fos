@@ -1,6 +1,7 @@
-import { useEffect, useState, type FormEvent } from "react"
+import { useEffect, useRef, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
+  IconAlertTriangle,
   IconBrain,
   IconLogout,
   IconMoon,
@@ -16,6 +17,7 @@ import { GraphPanel } from "@/components/graph-panel"
 import { OverviewPanel } from "@/components/overview-panel"
 import { PlaygroundPanel } from "@/components/playground-panel"
 import { ProposalsPanel } from "@/components/proposals-panel"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -27,6 +29,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Kbd } from "@/components/ui/kbd"
 import {
   Select,
   SelectContent,
@@ -34,9 +37,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { ApiError, fosApi, getStoredToken, setStoredToken } from "@/lib/api"
+import { spinOnce, usePanelTransition } from "@/lib/motion"
 import type { CardFilterPreset } from "@/lib/types"
 
 export function App() {
@@ -53,8 +59,11 @@ export function App() {
   const [addSeverity, setAddSeverity] = useState("P1")
   const [addScope, setAddScope] = useState("global")
   const [addContent, setAddContent] = useState("")
+  const refreshIconRef = useRef<HTMLSpanElement | null>(null)
+  const tabPanelRef = useRef<HTMLDivElement | null>(null)
 
   const queryClient = useQueryClient()
+  usePanelTransition(tabPanelRef, [activeTab], { y: 6, duration: 0.22 })
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", isDark)
@@ -121,20 +130,25 @@ export function App() {
   }
 
   return (
+    <TooltipProvider delay={150}>
     <div className="flex min-h-screen flex-col bg-background text-foreground">
       <Toaster position="bottom-right" richColors />
 
-      <header className="sticky top-0 z-20 border-b border-border bg-card/95 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-5 py-3">
-          <div className="flex items-center gap-2.5">
-            <IconBrain className="size-5 text-foreground" />
-            <div className="text-sm font-medium">FlowOS</div>
-            <Badge variant="outline" className="rounded-md font-mono text-xs">
-              snap: {dashboardQuery.data?.snapshot_version ?? healthQuery.data?.snapshot_version ?? "-"}
+      <header className="sticky top-0 z-20 border-b border-border bg-background/95 backdrop-blur">
+        <div className="flex w-full flex-wrap items-center justify-between gap-3 px-4 py-2">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <IconBrain className="size-4 text-chart-2" />
+              <span className="font-mono text-sm font-semibold tracking-tight">FlowOS</span>
+            </div>
+            <span className="text-border">/</span>
+            <Badge variant="outline" className="rounded-sm border-border/80 bg-card font-mono text-[11px] text-muted-foreground">
+              snap {dashboardQuery.data?.snapshot_version ?? healthQuery.data?.snapshot_version ?? "-"}
             </Badge>
             {dashboardQuery.data && (
-              <Badge variant="secondary" className="rounded-md font-mono text-xs">
-                vec: {dashboardQuery.data.sqlite_vec ? "on" : "off"} · {dashboardQuery.data.embedder ?? "local_hash"}
+              <Badge variant="outline" className="rounded-sm border-border/80 bg-card font-mono text-[11px] text-muted-foreground">
+                <span className={`mr-1.5 inline-block size-1.5 rounded-full ${dashboardQuery.data.sqlite_vec ? "bg-chart-2" : "bg-muted-foreground"}`} />
+                vec:{dashboardQuery.data.sqlite_vec ? "on" : "off"} · {dashboardQuery.data.embedder ?? "local_hash"}
               </Badge>
             )}
           </div>
@@ -149,21 +163,33 @@ export function App() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => void queryClient.invalidateQueries({ queryKey: ["fos"] })}
+                  onClick={() => {
+                    spinOnce(refreshIconRef.current)
+                    void queryClient.invalidateQueries({ queryKey: ["fos"] })
+                  }}
                 >
-                  <IconRefresh className="size-3.5" />
+                  <span ref={refreshIconRef} className="inline-flex">
+                    <IconRefresh className="size-3.5" />
+                  </span>
                   刷新
                 </Button>
               </>
             )}
-            <Button
-              variant="outline"
-              size="icon-sm"
-              aria-label="切换明暗主题"
-              onClick={() => setIsDark((d) => !d)}
-            >
-              {isDark ? <IconSun className="size-4" /> : <IconMoon className="size-4" />}
-            </Button>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    variant="outline"
+                    size="icon-sm"
+                    aria-label="切换明暗主题"
+                    onClick={() => setIsDark((d) => !d)}
+                  />
+                }
+              >
+                {isDark ? <IconSun className="size-4" /> : <IconMoon className="size-4" />}
+              </TooltipTrigger>
+              <TooltipContent>{isDark ? "切换浅色模式" : "切换暗黑模式"}</TooltipContent>
+            </Tooltip>
             {healthQuery.data?.auth_enabled && token && (
               <Button
                 variant="outline"
@@ -182,11 +208,15 @@ export function App() {
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-7xl flex-1 px-5 py-5">
+      <main className="w-full flex-1 px-4 py-3">
         {healthQuery.isError ? (
-          <div className="rounded-lg border border-border bg-card p-6 text-sm text-destructive">
-            无法连接到 fosd 服务（请确认 `fosd serve` 正在运行）。
-          </div>
+          <Alert variant="destructive">
+            <IconAlertTriangle className="size-4" />
+            <AlertTitle>无法连接到 fosd 服务</AlertTitle>
+            <AlertDescription>
+              请确认 <Kbd>fosd serve</Kbd> 正在运行，或检查服务端端口与网络配置。
+            </AlertDescription>
+          </Alert>
         ) : needsAuth ? (
           <AuthGate
             errorMessage={authError}
@@ -197,26 +227,41 @@ export function App() {
             }}
           />
         ) : dashboardQuery.isLoading || !dashboardQuery.data ? (
-          <div className="py-20 text-center text-sm text-muted-foreground">
-            正在加载 FlowOS 大脑状态...
+          <div className="flex flex-col gap-4">
+            <div className="flex gap-2 border-b border-border pb-2">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <Skeleton key={i} className="h-7 w-28" />
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <Skeleton key={i} className="h-24 w-full rounded-lg" />
+              ))}
+            </div>
+            <Skeleton className="h-20 w-full rounded-lg" />
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <Skeleton className="h-80 w-full rounded-lg" />
+              <Skeleton className="h-80 w-full rounded-lg" />
+            </div>
           </div>
         ) : (
           <Tabs value={activeTab} onValueChange={(v) => setActiveTab(String(v))}>
-            <TabsList className="mb-4">
-              <TabsTrigger value="overview">总览 Overview</TabsTrigger>
-              <TabsTrigger value="proposals">
-                推荐 Inbox ({dashboardQuery.data.counts.pending_proposals ?? 0})
+            <TabsList variant="line" className="mb-3 w-full justify-start overflow-x-auto border-b border-border pb-1 text-sm">
+              <TabsTrigger value="overview" className="flex-none px-3">总览 Overview</TabsTrigger>
+              <TabsTrigger value="proposals" className="flex-none px-3">
+                推荐 Inbox <span className="ml-1 font-mono text-xs text-chart-3">({dashboardQuery.data.counts.pending_proposals ?? 0})</span>
               </TabsTrigger>
-              <TabsTrigger value="cards">
-                知识卡片 Cards ({dashboardQuery.data.counts.active_nodes})
+              <TabsTrigger value="cards" className="flex-none px-3">
+                知识卡片 Cards <span className="ml-1 font-mono text-xs text-muted-foreground">({dashboardQuery.data.counts.active_nodes})</span>
               </TabsTrigger>
-              <TabsTrigger value="graph">双时态图谱 Graph</TabsTrigger>
-              <TabsTrigger value="playground">检索 &amp; 照镜子</TabsTrigger>
-              <TabsTrigger value="audit">
-                账本 &amp; 门禁 ({dashboardQuery.data.counts.ledger_atoms})
+              <TabsTrigger value="graph" className="flex-none px-3">双时态图谱 Graph</TabsTrigger>
+              <TabsTrigger value="playground" className="flex-none px-3">检索 &amp; 照镜子</TabsTrigger>
+              <TabsTrigger value="audit" className="flex-none px-3">
+                账本 &amp; 门禁 <span className="ml-1 font-mono text-xs text-muted-foreground">({dashboardQuery.data.counts.ledger_atoms})</span>
               </TabsTrigger>
             </TabsList>
 
+            <div ref={tabPanelRef}>
             <TabsContent value="overview">
               <OverviewPanel
                 dashboard={dashboardQuery.data}
@@ -256,6 +301,7 @@ export function App() {
             <TabsContent value="audit">
               <AuditPanel dashboard={dashboardQuery.data} />
             </TabsContent>
+            </div>
           </Tabs>
         )}
       </main>
@@ -264,7 +310,9 @@ export function App() {
       <Dialog open={addOpen} onOpenChange={setAddOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>录入新记忆 (fos add)</DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              录入新记忆 <Kbd>fos add</Kbd>
+            </DialogTitle>
             <DialogDescription>
               遵循「6 个月半衰期」标准：仅记录可复用的工程红线、个人原则或架构取舍（自动凭据脱敏）。
             </DialogDescription>
@@ -317,6 +365,7 @@ export function App() {
         </DialogContent>
       </Dialog>
     </div>
+    </TooltipProvider>
   )
 }
 

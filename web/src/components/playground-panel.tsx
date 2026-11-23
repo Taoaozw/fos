@@ -1,10 +1,9 @@
-import { useState, type FormEvent } from "react"
+import { useRef, useState, type FormEvent } from "react"
 import { useMutation } from "@tanstack/react-query"
 import { IconAlertTriangle, IconEyeCheck, IconSearch } from "@tabler/icons-react"
 import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import {
   Select,
@@ -15,6 +14,7 @@ import {
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { fosApi } from "@/lib/api"
+import { usePanelTransition } from "@/lib/motion"
 import type { DashboardResponse, MirrorResponse, RecallResponse } from "@/lib/types"
 
 interface PlaygroundPanelProps {
@@ -33,6 +33,11 @@ export function PlaygroundPanel({ dashboard, onJumpToCard }: PlaygroundPanelProp
   const [proposal, setProposal] = useState("")
   const [mirrorScope, setMirrorScope] = useState("__all__")
   const [mirrorRes, setMirrorRes] = useState<MirrorResponse | null>(null)
+  const recallResRef = useRef<HTMLDivElement | null>(null)
+  const mirrorResRef = useRef<HTMLDivElement | null>(null)
+
+  usePanelTransition(recallResRef, [recallRes], { y: 6, duration: 0.24 })
+  usePanelTransition(mirrorResRef, [mirrorRes], { y: 6, duration: 0.24 })
 
   const recallMutation = useMutation({
     mutationFn: () =>
@@ -67,16 +72,16 @@ export function PlaygroundPanel({ dashboard, onJumpToCard }: PlaygroundPanelProp
   }
 
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 lg:divide-x lg:divide-border">
       {/* Recall */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm font-medium">四路混合检索实验室 (fos recall)</CardTitle>
-          <CardDescription>
+      <section className="flex flex-col gap-3">
+        <div>
+          <h2 className="text-sm font-medium text-foreground">四路混合检索实验室 (fos recall)</h2>
+          <p className="text-xs text-muted-foreground">
             FTS5 BM25 + sqlite-vec + 触发器/图谱扩散 + 双时态 --as-of 切片
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
+          </p>
+        </div>
+        <div className="flex flex-col gap-3">
           <form onSubmit={handleRecall} className="flex flex-col gap-2.5">
             <Input
               value={query}
@@ -139,7 +144,7 @@ export function PlaygroundPanel({ dashboard, onJumpToCard }: PlaygroundPanelProp
           </form>
 
           {recallRes && (
-            <div className="flex flex-col gap-2.5">
+            <div ref={recallResRef} className="flex flex-col gap-2.5">
               <div className="font-mono text-xs text-muted-foreground">
                 命中 {recallRes.count} 条 · 消耗 {recallRes.used_tokens}/{recallRes.budget_tokens}{" "}
                 tokens · snap={recallRes.snapshot_version}
@@ -228,18 +233,18 @@ export function PlaygroundPanel({ dashboard, onJumpToCard }: PlaygroundPanelProp
               )}
             </div>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      </section>
 
       {/* Mirror */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm font-medium">决策前照镜子 (fos mirror)</CardTitle>
-          <CardDescription>
+      <section className="flex flex-col gap-3 lg:pl-6">
+        <div>
+          <h2 className="text-sm font-medium text-foreground">决策前照镜子 (fos mirror)</h2>
+          <p className="text-xs text-muted-foreground">
             并发比对红线冲突、历史错题、过往决策（含已否决方案）与未验证假设
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
+          </p>
+        </div>
+        <div className="flex flex-col gap-3">
           <form onSubmit={handleMirror} className="flex flex-col gap-2.5">
             <Textarea
               rows={3}
@@ -269,7 +274,7 @@ export function PlaygroundPanel({ dashboard, onJumpToCard }: PlaygroundPanelProp
           </form>
 
           {mirrorRes && (
-            <div className="flex flex-col gap-3 text-xs">
+            <div ref={mirrorResRef} className="flex flex-col gap-3 text-xs">
               <div className="flex flex-col gap-1.5">
                 <Badge variant="destructive" className="w-fit rounded-md text-xs">
                   红线冲突 Conflicts ({mirrorRes.conflicts.length})
@@ -343,8 +348,8 @@ export function PlaygroundPanel({ dashboard, onJumpToCard }: PlaygroundPanelProp
               </div>
             </div>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      </section>
     </div>
   )
 }

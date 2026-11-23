@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react"
-import { IconKey, IconBrain } from "@tabler/icons-react"
+import { IconAlertCircle, IconBrain, IconKey } from "@tabler/icons-react"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -44,7 +45,10 @@ export function AuthGate({ errorMessage, onSubmitToken }: AuthGateProps) {
               />
             </div>
             {errorMessage && (
-              <div className="text-xs text-destructive">{errorMessage}</div>
+              <Alert variant="destructive" className="py-2">
+                <IconAlertCircle className="size-4" />
+                <AlertDescription className="text-xs">{errorMessage}</AlertDescription>
+              </Alert>
             )}
             <Button type="submit" className="w-full">
               连接控制台

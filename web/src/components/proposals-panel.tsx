@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import {
   keepPreviousData,
   useMutation,
@@ -37,6 +37,7 @@ import {
 import { Separator } from "@/components/ui/separator"
 import { Textarea } from "@/components/ui/textarea"
 import { fosApi } from "@/lib/api"
+import { useRevealGroup } from "@/lib/motion"
 import type { Proposal } from "@/lib/types"
 
 interface ProposalsPanelProps {
@@ -430,6 +431,11 @@ export function ProposalsPanel({ onJumpToCard }: ProposalsPanelProps) {
   })
 
   const data = proposalsQuery.data
+  const listRef = useRef<HTMLDivElement | null>(null)
+  useRevealGroup(listRef, "[data-slot='card']", [statusFilter, data?.proposals.length], {
+    y: 8,
+    duration: 0.26,
+  })
   const l0Used = data?.l0_budget.used_tokens ?? 0
   const l0Limit = data?.l0_budget.limit_tokens ?? 300
   const l0Pct = Math.min(100, Math.round((l0Used / Math.max(1, l0Limit)) * 100))
@@ -484,6 +490,7 @@ export function ProposalsPanel({ onJumpToCard }: ProposalsPanelProps) {
       </Card>
 
       <div
+        ref={listRef}
         className={`flex flex-col gap-3 transition-opacity ${
           proposalsQuery.isPlaceholderData ? "opacity-60" : "opacity-100"
         }`}

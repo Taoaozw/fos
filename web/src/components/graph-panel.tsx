@@ -8,7 +8,6 @@ import {
 } from "@tabler/icons-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import {
   Select,
@@ -241,14 +240,14 @@ export function GraphPanel({ dashboard, onJumpToCard, themeVersion }: GraphPanel
   }
 
   return (
-    <Card>
-      <CardHeader className="gap-3">
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-2.5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <CardTitle className="text-sm font-medium">双时态知识图谱</CardTitle>
-            <CardDescription>
+            <h2 className="text-sm font-medium text-foreground">双时态知识图谱</h2>
+            <p className="text-xs text-muted-foreground">
               拖拽平移 · 按住 ⌘/Ctrl 滚轮缩放 · 悬停高亮 1-hop 演进与冲突邻域（显示 {filteredNodes.length} 节点 / {layout.edges.length} 语义边）
-            </CardDescription>
+            </p>
           </div>
           <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
             <span className="inline-flex items-center gap-1.5">
@@ -359,9 +358,9 @@ export function GraphPanel({ dashboard, onJumpToCard, themeVersion }: GraphPanel
             </Button>
           </div>
         </div>
-      </CardHeader>
+      </div>
 
-      <CardContent className="flex flex-col gap-3">
+      <div className="flex flex-col gap-3">
         <div
           ref={viewportRef}
           onWheel={handleWheel}
@@ -369,7 +368,7 @@ export function GraphPanel({ dashboard, onJumpToCard, themeVersion }: GraphPanel
           onMouseMove={handleMouseMove}
           onMouseUp={stopDrag}
           onMouseLeave={stopDrag}
-          className={`relative h-[540px] overflow-hidden rounded-lg border border-border bg-muted/20 select-none ${
+          className={`relative h-[calc(100vh-230px)] min-h-[540px] overflow-hidden rounded-sm border border-border bg-card/40 select-none ${
             dragging ? "cursor-grabbing" : "cursor-grab"
           }`}
         >
@@ -639,7 +638,7 @@ export function GraphPanel({ dashboard, onJumpToCard, themeVersion }: GraphPanel
             )}
           </div>
         )}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   )
 }

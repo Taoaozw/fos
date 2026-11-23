@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react"
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   IconArchive,
@@ -14,7 +14,6 @@ import {
 import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   Dialog,
   DialogContent,
@@ -35,6 +34,7 @@ import {
 import { Separator } from "@/components/ui/separator"
 import { Textarea } from "@/components/ui/textarea"
 import { fosApi } from "@/lib/api"
+import { usePanelTransition, useRevealGroup } from "@/lib/motion"
 import type { CardFilterPreset, CompiledNode, DashboardResponse } from "@/lib/types"
 
 interface CardsPanelProps {
@@ -129,6 +129,8 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
   const [archiveReason, setArchiveReason] = useState("")
 
   const queryClient = useQueryClient()
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const detailRef = useRef<HTMLDivElement | null>(null)
 
   const filteredNodes = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -219,6 +221,12 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
   }
 
   const detailNode = detailQuery.data?.node
+  useRevealGroup(listRef, "[data-anim='card-row']", [scope, status, severity, kind, special, filteredNodes.length], {
+    y: 5,
+    duration: 0.22,
+    maxItems: 24,
+  })
+  usePanelTransition(detailRef, [selectedNodeId, detailNode?.id], { x: 8, y: 0, duration: 0.22 })
 
   return (
     <div className="flex flex-col gap-4">
@@ -299,117 +307,109 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
 
       {/* Master-Detail Split */}
       <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-12">
-        <div className="flex flex-col gap-2.5 lg:col-span-7">
+        <div ref={listRef} className="flex flex-col border-y border-border divide-y divide-border lg:col-span-7">
           {filteredNodes.length === 0 ? (
-            <Card>
-              <CardContent className="py-10 text-center text-sm text-muted-foreground">
-                当前筛选条件下没有匹配的记忆卡片。
-              </CardContent>
-            </Card>
+            <div className="py-10 text-center text-sm text-muted-foreground">
+              当前筛选条件下没有匹配的记忆卡片。
+            </div>
           ) : (
             filteredNodes.map((n) => {
               const active = n.id === selectedNodeId
               return (
-                <Card
+                <div
                   key={n.id}
+                  data-anim="card-row"
                   onClick={() => onSelectNode(n.id)}
-                  className={`cursor-pointer gap-2 py-3.5 transition-colors hover:border-foreground/30 ${
-                    active ? "border-foreground/50 bg-accent/30" : ""
+                  className={`flex cursor-pointer flex-col gap-1.5 px-3 py-2.5 transition-colors hover:bg-accent/40 ${
+                    active ? "bg-accent/55" : ""
                   }`}
                 >
-                  <CardHeader className="px-4 py-0">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <Badge variant="outline" className="rounded-md font-mono text-xs">
-                          {n.id}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-mono text-xs font-medium text-foreground">{n.id}</span>
+                      <Badge
+                        variant={n.severity === "P0" ? "destructive" : "secondary"}
+                        className="h-4 rounded-sm px-1.5 font-mono text-[10px]"
+                      >
+                        {n.severity}
+                      </Badge>
+                      <span className="font-mono text-[11px] text-muted-foreground">{n.type}</span>
+                      <span className="font-mono text-[11px] text-chart-1">{n.scope}</span>
+                      {n.status !== "active" && (
+                        <Badge variant="secondary" className="h-4 rounded-sm px-1.5 text-[10px]">
+                          {n.status}
                         </Badge>
-                        <Badge
-                          variant={n.severity === "P0" ? "destructive" : "secondary"}
-                          className="rounded-md font-mono text-xs"
-                        >
-                          {n.severity}
+                      )}
+                      {n.pinned && (
+                        <Badge variant="destructive" className="h-4 rounded-sm px-1.5 text-[10px]">
+                          PINNED
                         </Badge>
-                        <Badge variant="outline" className="rounded-md text-xs">
-                          {n.type}
+                      )}
+                      {n.compat?.pattern === "code_exemplar" && (
+                        <Badge variant="outline" className="h-4 rounded-sm px-1.5 font-mono text-[10px] text-chart-1">
+                          pattern{n.compat.lang ? `:${n.compat.lang}` : ""}
                         </Badge>
-                        <Badge variant="outline" className="rounded-md font-mono text-xs">
-                          {n.scope}
-                        </Badge>
-                        {n.status !== "active" && (
-                          <Badge variant="secondary" className="rounded-md text-xs">
-                            {n.status}
-                          </Badge>
-                        )}
-                        {n.pinned && (
-                          <Badge variant="destructive" className="rounded-md text-xs">
-                            PINNED
-                          </Badge>
-                        )}
-                        {n.compat?.pattern === "code_exemplar" && (
-                          <Badge variant="secondary" className="rounded-md font-mono text-xs">
-                            pattern{n.compat.lang ? `:${n.compat.lang}` : ""}
-                          </Badge>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2 font-mono text-xs text-muted-foreground">
-                        {n.freshness && n.freshness !== "untracked" && (
-                          <span
-                            title={`freshness: ${n.freshness}`}
-                            className={`size-2 rounded-full ${
-                              n.freshness === "fresh"
-                                ? "bg-chart-2"
-                                : n.freshness === "drifted"
-                                  ? "bg-chart-3"
-                                  : "bg-chart-5"
-                            }`}
-                          />
-                        )}
-                        {(n.recall_hits ?? 0) > 0 && <span>hits:{n.recall_hits}</span>}
-                        <span>seen:{n.seen_count} · {(n.valid_from || "").slice(0, 10)}</span>
-                      </div>
+                      )}
                     </div>
-                  </CardHeader>
-                  <CardContent className="flex flex-col gap-1.5 px-4 py-0">
-                    <div className="text-sm font-medium text-foreground">{n.rule}</div>
-                    {n.rationale && (
-                      <div className="line-clamp-2 text-xs text-muted-foreground">
-                        原因：{n.rationale}
-                      </div>
-                    )}
-                    {n.guard_hint && (
-                      <div className="flex items-start gap-1.5 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs text-foreground">
-                        <IconShieldCheck className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-                        <span>守卫建议：{n.guard_hint}</span>
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
+                    <div className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
+                      {n.freshness && n.freshness !== "untracked" && (
+                        <span
+                          title={`freshness: ${n.freshness}`}
+                          className={`size-1.5 rounded-full ${
+                            n.freshness === "fresh"
+                              ? "bg-chart-2"
+                              : n.freshness === "drifted"
+                                ? "bg-chart-3"
+                                : "bg-chart-5"
+                          }`}
+                        />
+                      )}
+                      {(n.recall_hits ?? 0) > 0 && <span>hits:{n.recall_hits}</span>}
+                      <span>seen:{n.seen_count} · {(n.valid_from || "").slice(0, 10)}</span>
+                    </div>
+                  </div>
+                  <div className="text-[14px] font-medium leading-6 text-foreground">{n.rule}</div>
+                  {n.rationale && (
+                    <div className="line-clamp-2 text-[13px] leading-relaxed text-muted-foreground">
+                      原因：{n.rationale}
+                    </div>
+                  )}
+                  {n.guard_hint && (
+                    <div className="flex items-start gap-1.5 text-xs text-chart-2">
+                      <IconShieldCheck className="mt-0.5 size-3.5 shrink-0" />
+                      <span className="line-clamp-1">守卫建议：{n.guard_hint}</span>
+                    </div>
+                  )}
+                </div>
               )
             })
           )}
         </div>
 
         {/* Right Detail Panel */}
-        <Card className="lg:sticky lg:top-16 lg:col-span-5">
+        <div
+          ref={detailRef}
+          className="flex flex-col gap-3 border-t border-border pt-3 lg:sticky lg:top-14 lg:col-span-5 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-4"
+        >
           {!selectedNodeId ? (
-            <CardContent className="py-12 text-center text-sm text-muted-foreground">
+            <div className="py-12 text-center text-sm text-muted-foreground">
               点击左侧任意记忆卡片，查看 L1/L2 无损原文证据、双时态关系，或执行纠偏 / 归档 / 钉选。
-            </CardContent>
+            </div>
           ) : detailQuery.isLoading ? (
-            <CardContent className="py-12 text-center text-sm text-muted-foreground">
+            <div className="py-12 text-center text-sm text-muted-foreground">
               加载 L2 证据与双时态图谱...
-            </CardContent>
+            </div>
           ) : detailNode ? (
             <>
-              <CardHeader className="gap-2">
+              <div className="flex flex-col gap-2 border-b border-border pb-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <Badge variant="outline" className="rounded-md font-mono text-xs">
+                    <Badge variant="outline" className="rounded-sm font-mono text-xs">
                       {detailNode.id}
                     </Badge>
                     <Badge
                       variant={detailNode.severity === "P0" ? "destructive" : "secondary"}
-                      className="rounded-md font-mono text-xs"
+                      className="rounded-sm font-mono text-xs"
                     >
                       {detailNode.severity}
                     </Badge>
@@ -496,18 +496,18 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
                     </Button>
                   </div>
                 </div>
-                <CardTitle className="text-sm font-medium leading-snug">
+                <h3 className="text-sm font-medium leading-snug text-foreground">
                   {detailNode.rule}
-                </CardTitle>
-                <CardDescription className="font-mono text-xs">
+                </h3>
+                <div className="font-mono text-xs text-muted-foreground">
                   Seen {detailNode.seen_count}× · hits {detailNode.recall_hits ?? 0} ·
                   utility {Math.round((detailNode.utility_score ?? 0.5) * 100)}% (+{detailNode.useful_count ?? 0}/-{detailNode.noise_count ?? 0}) ·{" "}
                   {(detailNode.valid_from || "").slice(0, 19)} →{" "}
                   {detailNode.valid_until ? detailNode.valid_until.slice(0, 19) : "present"}
-                </CardDescription>
-              </CardHeader>
+                </div>
+              </div>
 
-              <CardContent className="flex flex-col gap-4">
+              <div className="flex flex-col gap-3.5">
                 {detailNode.superseded_by && (
                   <div className="flex items-center justify-between rounded-md border border-border bg-muted/40 px-3 py-2 text-xs">
                     <span className="text-muted-foreground">
@@ -641,14 +641,14 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
                     </div>
                   </ScrollArea>
                 </div>
-              </CardContent>
+              </div>
             </>
           ) : (
-            <CardContent className="py-10 text-center text-sm text-destructive">
+            <div className="py-10 text-center text-sm text-destructive">
               未能加载节点详情
-            </CardContent>
+            </div>
           )}
-        </Card>
+        </div>
       </div>
 
       {/* Correct Dialog */}

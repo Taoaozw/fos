@@ -2,11 +2,13 @@
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
+@custom-variant data-horizontal (&[data-orientation="horizontal"]);
+@custom-variant data-vertical (&[data-orientation="vertical"]);
 
 @theme inline {
-  --font-sans: "Geist Variable", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  --font-heading: "Geist Variable", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --font-heading: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, "PingFang SC", "Hiragino Sans GB", monospace;
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -39,6 +41,7 @@
 }
 
 :root {
+  color-scheme: light;
   --radius: 0.5rem;
   --background: oklch(0.99 0.002 286);
   --foreground: oklch(0.145 0.015 286);
@@ -67,37 +70,64 @@
 }
 
 .dark {
-  --background: oklch(0.14 0.012 280);
-  --foreground: oklch(0.95 0.006 280);
-  --card: oklch(0.175 0.014 280);
-  --card-foreground: oklch(0.95 0.006 280);
-  --popover: oklch(0.175 0.014 280);
-  --popover-foreground: oklch(0.95 0.006 280);
-  --primary: oklch(0.92 0.01 280);
-  --primary-foreground: oklch(0.16 0.015 280);
-  --secondary: oklch(0.225 0.016 280);
-  --secondary-foreground: oklch(0.95 0.006 280);
-  --muted: oklch(0.225 0.016 280);
-  --muted-foreground: oklch(0.68 0.016 280);
-  --accent: oklch(0.245 0.018 280);
-  --accent-foreground: oklch(0.95 0.006 280);
-  --destructive: oklch(0.64 0.2 25);
+  color-scheme: dark;
+  --background: oklch(0.115 0.006 260);
+  --foreground: oklch(0.9 0.005 260);
+  --card: oklch(0.145 0.007 260);
+  --card-foreground: oklch(0.9 0.005 260);
+  --popover: oklch(0.16 0.008 260);
+  --popover-foreground: oklch(0.9 0.005 260);
+  --primary: oklch(0.92 0.006 260);
+  --primary-foreground: oklch(0.13 0.006 260);
+  --secondary: oklch(0.19 0.008 260);
+  --secondary-foreground: oklch(0.88 0.005 260);
+  --muted: oklch(0.19 0.008 260);
+  --muted-foreground: oklch(0.69 0.01 260);
+  --accent: oklch(0.22 0.009 260);
+  --accent-foreground: oklch(0.93 0.005 260);
+  --destructive: oklch(0.68 0.2 22);
   --destructive-foreground: oklch(0.98 0 0);
-  --border: oklch(0.27 0.018 280);
-  --input: oklch(0.27 0.018 280);
-  --ring: oklch(0.55 0.03 280);
-  --chart-1: oklch(0.68 0.16 250);
-  --chart-2: oklch(0.7 0.15 162);
-  --chart-3: oklch(0.76 0.15 75);
-  --chart-4: oklch(0.7 0.17 300);
-  --chart-5: oklch(0.66 0.19 25);
+  --border: oklch(0.24 0.009 260);
+  --input: oklch(0.25 0.009 260);
+  --ring: oklch(0.58 0.02 260);
+  --chart-1: oklch(0.73 0.15 230);
+  --chart-2: oklch(0.75 0.16 160);
+  --chart-3: oklch(0.76 0.16 55);
+  --chart-4: oklch(0.72 0.16 295);
+  --chart-5: oklch(0.7 0.19 22);
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
+  html {
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
   body {
-    @apply bg-background text-foreground font-sans antialiased;
+    @apply bg-background text-foreground font-sans text-sm leading-relaxed antialiased selection:bg-foreground/15;
+  }
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 9999px;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--muted-foreground);
   }
 }
