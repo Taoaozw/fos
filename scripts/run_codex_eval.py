@@ -31,6 +31,7 @@ if str(SRC_DIR) not in sys.path:
 from fos.engine import BrainEngine  # noqa: E402
 from fos.freshness import compute_doc_digest  # noqa: E402
 from fos.output import compact_source_ref  # noqa: E402
+from fos.scopes import detect_named_repo_scopes  # noqa: E402
 from fos.tokens import estimate_tokens  # noqa: E402
 
 
@@ -103,7 +104,8 @@ def _run_codex(prompt: str, *, env_overrides: dict[str, str], timeout_s: int = 9
 
 
 def _format_fos_context(engine: BrainEngine, *, scope: str | None, recall_query: str) -> tuple[str, int, list[str]]:
-    boot = engine.boot(project=scope, budget=300)
+    mounted = detect_named_repo_scopes(scope) or None
+    boot = engine.boot(project=scope, scopes=mounted, budget=300)
     # Only skip L1 re-emission for L0 entries whose full rule already fit verbatim (no '…' truncation) and have no source_ref pointer needed
     complete_boot_ids = [
         str(e["id"])
@@ -119,7 +121,14 @@ def _format_fos_context(engine: BrainEngine, *, scope: str | None, recall_query:
                 if bn is not None and not bn.source_ref and estimate_tokens(bn.rule) <= 28:
                     exclude_for_recall.append(bid)
 
-    rec = engine.recall(recall_query, scope=scope, budget=900, limit=8, exclude_ids=exclude_for_recall or None)
+    rec = engine.recall(
+        recall_query,
+        scope=scope,
+        scopes=mounted,
+        budget=900,
+        limit=8,
+        exclude_ids=exclude_for_recall or None,
+    )
     recalled_ids = [str(item["id"]) for item in (rec.get("results") or []) if item.get("id")]
 
     lines = [

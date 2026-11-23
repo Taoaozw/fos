@@ -11,6 +11,7 @@ from fos.errors import NotFoundError, UsageError
 from fos.ledger import LedgerStore
 from fos.models import EvalCase, parse_timestamp
 from fos.providers import ProviderBundle
+from fos.scopes import detect_named_repo_scopes, scope_kind
 from fos.store import SnapshotDB
 
 VALID_SUITES = ("all", "recall", "temporal", "fidelity", "behavior")
@@ -103,8 +104,21 @@ def _eval_recall(
     pinned_top3 = 0
     failures: list[dict[str, Any]] = []
 
+    repo_scopes_cache: dict[str, list[str]] = {}
+
     for case in recall_cases:
         active_expected = _resolve_expected_ids(db, case, ev_to_node)
+        eval_scopes: list[str] | None = None
+        if case.scope and scope_kind(case.scope) == "repo":
+            if case.scope not in repo_scopes_cache:
+                repo_scopes_cache[case.scope] = detect_named_repo_scopes(case.scope)
+            mounted = list(repo_scopes_cache[case.scope])
+            # Also mount any domain scope that an expected evidence node was promoted into
+            for eid in active_expected:
+                en = db.get_node(eid)
+                if en is not None and scope_kind(en.scope) == "domain" and en.scope not in mounted:
+                    mounted.append(en.scope)
+            eval_scopes = mounted or None
 
         res = query_snapshot_recall(
             db,
@@ -112,6 +126,7 @@ def _eval_recall(
             embedder=providers.embedder,
             reranker=providers.reranker,
             scope=case.scope,
+            scopes=eval_scopes,
             budget=2400,
             limit=10,
         )

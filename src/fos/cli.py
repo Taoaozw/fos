@@ -524,7 +524,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             if args.background and not as_json:
                 return int(ExitCode.OK)
         elif cmd == "boot":
-            from fos.scopes import canonical_repo_name, detect_repo_scopes, parse_scopes_param
+            from fos.scopes import canonical_repo_name, detect_named_repo_scopes, detect_repo_scopes, parse_scopes_param, scope_kind
 
             explicit_scopes = parse_scopes_param(args.scopes)
             git_proj = _detect_git_project()
@@ -536,6 +536,8 @@ def run_cli(argv: list[str] | None = None) -> int:
                 auto_scopes: list[str] = []
                 if project and git_proj and canonical_repo_name(project) == git_proj:
                     auto_scopes = detect_repo_scopes(Path.cwd())
+                elif project and scope_kind(project) == "repo":
+                    auto_scopes = detect_named_repo_scopes(project)
                 mounted_scopes = list(dict.fromkeys([*auto_scopes, *explicit_scopes])) or None
             result = client.boot(project=project, scopes=mounted_scopes, budget=args.budget)
             if args.hook and not as_json and not fields:
@@ -543,7 +545,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 return int(ExitCode.OK)
         elif cmd == "recall":
             from fos.code_pattern import detect_repo_stack_versions
-            from fos.scopes import canonical_repo_name, detect_repo_scopes, parse_scopes_param
+            from fos.scopes import canonical_repo_name, detect_named_repo_scopes, detect_repo_scopes, parse_scopes_param, scope_kind
 
             cwd_stack, _ = detect_repo_stack_versions(Path.cwd())
             explicit_scopes = parse_scopes_param(args.scopes)
@@ -551,6 +553,8 @@ def run_cli(argv: list[str] | None = None) -> int:
             auto_scopes: list[str] = []
             if args.scope and git_proj and canonical_repo_name(args.scope) == git_proj:
                 auto_scopes = detect_repo_scopes(Path.cwd(), cwd_stack=cwd_stack or None)
+            elif args.scope and scope_kind(args.scope) == "repo":
+                auto_scopes = detect_named_repo_scopes(args.scope)
             mounted_scopes = list(dict.fromkeys([*auto_scopes, *explicit_scopes])) or None
             excl = [x.strip() for x in args.exclude.split(",") if x.strip()] if args.exclude else None
             result = client.recall(
@@ -567,15 +571,15 @@ def run_cli(argv: list[str] | None = None) -> int:
         elif cmd == "get":
             result = client.get(args.node_id, tier=args.tier, include_graph=args.graph)
         elif cmd == "mirror":
-            from fos.scopes import canonical_repo_name, detect_repo_scopes, parse_scopes_param
+            from fos.scopes import canonical_repo_name, detect_named_repo_scopes, detect_repo_scopes, parse_scopes_param, scope_kind
 
             explicit_scopes = parse_scopes_param(args.scopes)
             git_proj = _detect_git_project()
-            auto_scopes = (
-                detect_repo_scopes(Path.cwd())
-                if (args.scope and git_proj and canonical_repo_name(args.scope) == git_proj)
-                else []
-            )
+            auto_scopes: list[str] = []
+            if args.scope and git_proj and canonical_repo_name(args.scope) == git_proj:
+                auto_scopes = detect_repo_scopes(Path.cwd())
+            elif args.scope and scope_kind(args.scope) == "repo":
+                auto_scopes = detect_named_repo_scopes(args.scope)
             mounted_scopes = list(dict.fromkeys([*auto_scopes, *explicit_scopes])) or None
             result = client.mirror(args.proposal, scope=args.scope, scopes=mounted_scopes)
         elif cmd == "add":

@@ -11,6 +11,7 @@ Design:
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Literal
@@ -330,21 +331,79 @@ def _parse_manifests_in_dir(target_dir: Path) -> dict[str, str]:
     return stack
 
 
-def _detect_marker_scopes(base_dir: Path, *, include_web_subdir: bool = True) -> list[str]:
+def _iter_monorepo_package_dirs(repo_root: Path) -> list[Path]:
+    """Return common single-level/two-level sub-package directories inside a repo root."""
+    dirs: list[Path] = []
+    for name in ("web", "frontend", "backend", "server", "client"):
+        d = repo_root / name
+        if d.is_dir():
+            dirs.append(d)
+    for container in ("web", "apps", "services"):
+        cdir = repo_root / container
+        if cdir.is_dir():
+            try:
+                for child in sorted(cdir.iterdir()):
+                    if child.is_dir() and not child.name.startswith(".") and child.name not in ("node_modules", "dist", "build"):
+                        dirs.append(child)
+            except OSError:
+                pass
+    return dirs
+
+
+def _detect_marker_scopes(base_dir: Path, *, include_subdirs: bool = True) -> list[str]:
     """Detect lightweight filesystem markers for ops/shadcn/sql scopes (fast stat-only checks)."""
     found: list[str] = []
-    # Ops / infrastructure markers
+    scan_dirs = [base_dir] + (_iter_monorepo_package_dirs(base_dir) if include_subdirs else [])
     ops_files = ("Dockerfile", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
     ops_dirs = ("deploy", "k8s", "terraform", ".github/workflows")
-    if any((base_dir / f).is_file() for f in ops_files) or any((base_dir / d).is_dir() for d in ops_dirs):
-        found.append("eng/ops")
-    # shadcn / UI kit markers
-    if (base_dir / "components.json").is_file() or (include_web_subdir and (base_dir / "web" / "components.json").is_file()):
-        found.append("eng/frontend/shadcn")
-    # SQL / migrations markers
-    if any((base_dir / d).is_dir() for d in ("migrations", "alembic", "prisma")):
-        found.append("eng/backend/sql")
+    sql_dirs = ("migrations", "alembic", "prisma")
+
+    for d in scan_dirs:
+        if "eng/ops" not in found and (
+            any((d / f).is_file() for f in ops_files) or any((d / sd).is_dir() for sd in ops_dirs)
+        ):
+            found.append("eng/ops")
+        if "eng/frontend/shadcn" not in found and (d / "components.json").is_file():
+            found.append("eng/frontend/shadcn")
+        if "eng/backend/sql" not in found and any((d / sd).is_dir() for sd in sql_dirs):
+            found.append("eng/backend/sql")
     return found
+
+
+def detect_named_repo_scopes(repo_scope: str | None) -> list[str]:
+    """Locate a local checkout for a named repo scope and return its auto-detected stack scopes."""
+    if not repo_scope or scope_kind(repo_scope) != "repo":
+        return []
+    target = canonical_repo_name(repo_scope)
+    roots: list[Path] = []
+    env_root = os.environ.get("FOS_GIT_ROOT")
+    if env_root:
+        roots.append(Path(env_root).expanduser())
+    try:
+        roots.append(Path.cwd().resolve().parent)
+    except OSError:
+        pass
+    home = Path.home()
+    roots.extend(
+        [
+            home / "project" / "clive",
+            home / "projects" / "clive",
+            home / "project",
+            home / "projects",
+        ]
+    )
+    seen: set[Path] = set()
+    for r in roots:
+        try:
+            cand = (r / target).resolve()
+        except OSError:
+            continue
+        if cand in seen:
+            continue
+        seen.add(cand)
+        if cand.is_dir() and ((cand / ".git").exists() or detect_repo_root(cand) == cand):
+            return detect_repo_scopes(cand)
+    return []
 
 
 def map_stack_to_scopes(stack: dict[str, str] | None) -> list[str]:
@@ -401,14 +460,18 @@ def detect_repo_scopes(
                 sub_stack = _parse_manifests_in_dir(subpkg)
                 for sc in map_stack_to_scopes(sub_stack):
                     _add_with_ancestors(sc)
-                for sc in _detect_marker_scopes(subpkg, include_web_subdir=False):
+                for sc in _detect_marker_scopes(subpkg, include_subdirs=False):
                     _add_with_ancestors(sc)
             else:
                 if cwd_stack is None:
                     root_stack, _ = detect_repo_stack_versions(repo_root)
                     for sc in map_stack_to_scopes(root_stack):
                         _add_with_ancestors(sc)
-                for sc in _detect_marker_scopes(repo_root, include_web_subdir=True):
+                # Also inspect monorepo sub-packages (`frontend/`, `backend/`, `web/console/`, etc.)
+                for pkg_dir in _iter_monorepo_package_dirs(repo_root):
+                    for sc in map_stack_to_scopes(_parse_manifests_in_dir(pkg_dir)):
+                        _add_with_ancestors(sc)
+                for sc in _detect_marker_scopes(repo_root, include_subdirs=True):
                     _add_with_ancestors(sc)
 
     detected.sort(key=lambda s: (-scope_depth(s), s))
