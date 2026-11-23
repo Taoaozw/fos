@@ -17,6 +17,10 @@ export default defineConfig({
         target: process.env.FOS_BRAIN_URL ?? "http://127.0.0.1:7622",
         changeOrigin: true,
       },
+      "/install.sh": {
+        target: process.env.FOS_BRAIN_URL ?? "http://127.0.0.1:7622",
+        changeOrigin: true,
+      },
     },
   },
 })

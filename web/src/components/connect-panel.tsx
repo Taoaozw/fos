@@ -25,14 +25,18 @@ import { Input } from "@/components/ui/input"
 import { Kbd } from "@/components/ui/kbd"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
+  DEFAULT_BRAIN_PORT,
   TOKEN_PLACEHOLDER,
+  VITE_DEV_PORT,
   buildAgentSetupPrompt,
   buildAgentWorkflowPrompt,
   buildCurlExamples,
   buildInstallCommand,
   buildManualCommands,
   isLoopbackUrl,
+  isViteDevUrl,
   normalizeBrainUrl,
+  resolveDefaultBrainUrl,
 } from "@/lib/connect-templates"
 import { useRevealGroup } from "@/lib/motion"
 import type { HealthResponse } from "@/lib/types"
@@ -148,10 +152,9 @@ const SUPPORTED_SKILL_TOOLS = [
 
 export function ConnectPanel({ health, token }: ConnectPanelProps) {
   const defaultOrigin = useMemo(() => {
-    if (typeof window !== "undefined" && window.location?.origin) {
-      return window.location.origin
-    }
-    return "http://<m3max-tailscale-ip>:7622"
+    return resolveDefaultBrainUrl(
+      typeof window !== "undefined" ? window.location?.origin : undefined
+    )
   }, [])
 
   const [brainUrl, setBrainUrl] = useState<string>(defaultOrigin)
@@ -167,6 +170,7 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
   const effectiveUrl = normalizeBrainUrl(brainUrl)
   const effectiveToken = includeRealToken && token ? token : TOKEN_PLACEHOLDER
   const loopbackWarning = isLoopbackUrl(effectiveUrl)
+  const viteDevWarning = isViteDevUrl(effectiveUrl)
   const cliPublished = Boolean(health?.cli_version)
 
   const installCmd = useMemo(
@@ -301,8 +305,29 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
         </div>
 
         {/* Dynamic Readiness Alerts */}
-        {(loopbackWarning || !cliPublished) && (
+        {(loopbackWarning || viteDevWarning || !cliPublished) && (
           <div className="flex flex-col gap-2">
+            {viteDevWarning && (
+              <Alert variant="destructive" className="py-2.5">
+                <IconAlertTriangle className="size-4" />
+                <AlertTitle className="flex flex-wrap items-center justify-between gap-2 text-xs font-semibold">
+                  <span>端口 {VITE_DEV_PORT} 是前端开发服务器，不是 fosd 大脑端口</span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-6 rounded-md px-2 text-[11px]"
+                    onClick={() => setBrainUrl(resolveDefaultBrainUrl(effectiveUrl))}
+                  >
+                    改为 :{DEFAULT_BRAIN_PORT}
+                  </Button>
+                </AlertTitle>
+                <AlertDescription className="text-xs">
+                  访问 <Kbd>:{VITE_DEV_PORT}/install.sh</Kbd> 会返回前端 HTML 导致脚本语法报错；常驻大脑 <Kbd>fosd</Kbd> 监听在{" "}
+                  <Kbd>:{DEFAULT_BRAIN_PORT}</Kbd> 端口。
+                </AlertDescription>
+              </Alert>
+            )}
             {loopbackWarning && (
               <Alert className="border-chart-3/40 bg-chart-3/8 py-2.5">
                 <IconAlertTriangle className="size-4 text-chart-3" />

@@ -1,10 +1,40 @@
 export const TOKEN_PLACEHOLDER = "<YOUR_TOKEN>"
 export const FALLBACK_BRAIN_URL = "http://<m3max-tailscale-ip>:7622"
+export const DEFAULT_BRAIN_PORT = "7622"
+export const VITE_DEV_PORT = "5178"
 
 /** Normalize user-entered brain URL by trimming whitespace and trailing slashes. */
 export function normalizeBrainUrl(raw: string): string {
   const trimmed = raw.trim().replace(/\/+$/, "")
   return trimmed || FALLBACK_BRAIN_URL
+}
+
+/** Detect Vite dev server port (5178), which serves SPA HTML instead of fosd (7622). */
+export function isViteDevUrl(raw: string): boolean {
+  const normalized = raw.trim()
+  if (!normalized) return false
+  try {
+    const parsed = new URL(normalized.includes("://") ? normalized : `http://${normalized}`)
+    return parsed.port === VITE_DEV_PORT
+  } catch {
+    return new RegExp(`:${VITE_DEV_PORT}(/|$)`).test(normalized)
+  }
+}
+
+/** Derive default Brain URL from browser origin, rewriting Vite dev port 5178 -> 7622. */
+export function resolveDefaultBrainUrl(origin?: string): string {
+  const trimmed = (origin ?? "").trim().replace(/\/+$/, "")
+  if (!trimmed) return FALLBACK_BRAIN_URL
+  try {
+    const parsed = new URL(trimmed)
+    if (parsed.port === VITE_DEV_PORT) {
+      parsed.port = DEFAULT_BRAIN_PORT
+      return parsed.origin
+    }
+    return parsed.origin
+  } catch {
+    return trimmed
+  }
 }
 
 /** Detect loopback / non-routable hosts that another computer cannot reach. */

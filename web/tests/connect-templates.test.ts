@@ -8,13 +8,27 @@ import {
   buildInstallCommand,
   buildManualCommands,
   isLoopbackUrl,
+  isViteDevUrl,
   normalizeBrainUrl,
+  resolveDefaultBrainUrl,
 } from "../src/lib/connect-templates"
 
 describe("connect-templates", () => {
   test("normalizeBrainUrl trims whitespace and trailing slashes", () => {
     expect(normalizeBrainUrl("  http://100.64.0.10:7622/// ")).toBe("http://100.64.0.10:7622")
     expect(normalizeBrainUrl("   ")).toBe(FALLBACK_BRAIN_URL)
+  })
+
+  test("resolveDefaultBrainUrl rewrites Vite dev port 5178 to fosd port 7622", () => {
+    expect(resolveDefaultBrainUrl("http://100.105.149.20:5178")).toBe("http://100.105.149.20:7622")
+    expect(resolveDefaultBrainUrl("http://localhost:5178")).toBe("http://localhost:7622")
+    expect(resolveDefaultBrainUrl("http://100.105.149.20:7622")).toBe("http://100.105.149.20:7622")
+    expect(resolveDefaultBrainUrl("")).toBe(FALLBACK_BRAIN_URL)
+  })
+
+  test("isViteDevUrl detects port 5178", () => {
+    expect(isViteDevUrl("http://100.105.149.20:5178")).toBe(true)
+    expect(isViteDevUrl("http://100.105.149.20:7622")).toBe(false)
   })
 
   test("isLoopbackUrl detects localhost / 127.0.0.1 / ::1 and allows LAN or Tailscale IPs", () => {
