@@ -50,9 +50,11 @@ describe("connect-templates", () => {
     )
   })
 
-  test("buildManualCommands and buildCurlExamples include normalized URL and token", () => {
-    const manual = buildManualCommands("http://100.88.1.2:7622/", "fos_tok")
+  test("buildManualCommands and buildCurlExamples include normalized URL, PEP-427 wheel filename, and token", () => {
+    const manual = buildManualCommands("http://100.88.1.2:7622/", "fos_tok", "0.2.3")
     expect(manual).toContain("http://100.88.1.2:7622/v1/cli/download")
+    expect(manual).toContain("/tmp/fos-0.2.3-py3-none-any.whl")
+    expect(manual).not.toContain("fos-latest")
     expect(manual).toContain("fos init --brain http://100.88.1.2:7622 --token fos_tok")
     expect(manual).toContain("fos skill install")
 

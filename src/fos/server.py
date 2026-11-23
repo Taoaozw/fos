@@ -258,8 +258,10 @@ def create_app(
     @app.get("/install.sh")
     def install_script(request: Request) -> PlainTextResponse:
         base_url = _brain_base_url(request)
+        published = find_published_wheel(dist_dir)
+        wheel_name = published[1].name if published is not None else f"fos-{__version__}-py3-none-any.whl"
         tmpl = resources.files("fos.assets").joinpath("install.sh").read_text(encoding="utf-8")
-        rendered = tmpl.replace("{{BRAIN}}", base_url)
+        rendered = tmpl.replace("{{BRAIN}}", base_url).replace("{{WHEEL_NAME}}", wheel_name)
         return PlainTextResponse(rendered, media_type="text/plain; charset=utf-8", headers={"Cache-Control": "no-cache"})
 
     @app.get("/v1/cli/version", dependencies=[Depends(require_auth)])

@@ -75,14 +75,20 @@ export function buildInstallCommand(brainUrl: string, token?: string): string {
 }
 
 /** Method 2: Step-by-step manual setup for custom environments or debugging. */
-export function buildManualCommands(brainUrl: string, token?: string): string {
+export function buildManualCommands(
+  brainUrl: string,
+  token?: string,
+  cliVersion?: string
+): string {
   const url = normalizeBrainUrl(brainUrl)
   const tok = resolveToken(token)
   const tokArg = shellArg(tok)
+  const ver = (cliVersion ?? "").trim() || "0.1.0"
+  const wheelPath = `/tmp/fos-${ver}-py3-none-any.whl`
   return [
     "# 1. 确保已安装 uv（若未安装请先运行: curl -LsSf https://astral.sh/uv/install.sh | sh）",
-    `curl -fsSL -H "Authorization: Bearer ${tok}" "${url}/v1/cli/download" -o /tmp/fos-latest-py3-none-any.whl`,
-    "uv tool install --force --reinstall /tmp/fos-latest-py3-none-any.whl",
+    `curl -fsSL -H "Authorization: Bearer ${tok}" "${url}/v1/cli/download" -o ${wheelPath}`,
+    `uv tool install --force --reinstall ${wheelPath}`,
     "",
     "# 2. 绑定大脑地址与 Token，并拉取离线缓存",
     `fos init --brain ${shellArg(url)} --token ${tokArg}`,

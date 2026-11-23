@@ -145,11 +145,13 @@ def test_auto_update_version_rules_download_sha_and_install_sh(tmp_path: Path) -
     app = create_app(engine=engine, token_hash=hash_token(token))
     transport = _asgi_sync_transport(app)
 
-    # 1. Public /install.sh renders brain URL cleanly
+    # 1. Public /install.sh renders brain URL and PEP-427 wheel filename cleanly
     tc = TestClient(app)
     r_sh = tc.get("/install.sh", headers={"host": "m3max.tailnet:7622"})
     assert r_sh.status_code == 200
     assert "BRAIN='http://m3max.tailnet:7622'" in r_sh.text
+    assert 'WHEEL="$TMP_DIR/fos-0.2.0-py3-none-any.whl"' in r_sh.text
+    assert "fos-latest" not in r_sh.text
     assert "/v1/cli/download" in r_sh.text
 
     # 2. Authenticated /v1/cli/version & /v1/cli/download advertise version + SHA-256

@@ -20,7 +20,7 @@ fi
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
-WHEEL="$TMP_DIR/fos-latest-py3-none-any.whl"
+WHEEL="$TMP_DIR/{{WHEEL_NAME}}"
 
 echo "Downloading fos CLI wheel from $BRAIN ..."
 curl -fsSL -H "Authorization: Bearer $TOKEN" "$BRAIN/v1/cli/download" -o "$WHEEL"

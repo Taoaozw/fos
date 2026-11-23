@@ -178,8 +178,8 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
     [effectiveUrl, effectiveToken]
   )
   const manualCmds = useMemo(
-    () => buildManualCommands(effectiveUrl, effectiveToken),
-    [effectiveUrl, effectiveToken]
+    () => buildManualCommands(effectiveUrl, effectiveToken, health?.cli_version),
+    [effectiveUrl, effectiveToken, health?.cli_version]
   )
   const curlCmds = useMemo(
     () => buildCurlExamples(effectiveUrl, effectiveToken),
