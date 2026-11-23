@@ -501,6 +501,33 @@ class StateDB:
         ).fetchone()
         return self._row_to_atom(row) if row is not None else None
 
+    def find_atom_by_evidence_ref(
+        self,
+        scope: str,
+        *,
+        evidence_ref: str = "",
+        commit_sha: str = "",
+    ) -> LedgerAtom | None:
+        """Cross-device idempotency lookup by `(scope, evidence_ref|commit_sha)` in `meta_json`."""
+        ref = evidence_ref.strip()
+        sha = commit_sha.strip()
+        if not ref and not sha:
+            return None
+        clauses: list[str] = []
+        params: list[Any] = [scope]
+        if ref:
+            clauses.append("json_extract(meta_json, '$.evidence_ref') = ?")
+            params.append(ref)
+        if sha:
+            clauses.append("json_extract(meta_json, '$.commit_sha') = ?")
+            params.append(sha)
+        where = " OR ".join(clauses)
+        row = self.conn.execute(
+            f"SELECT * FROM ledger_atoms WHERE scope = ? AND ({where}) LIMIT 1",
+            tuple(params),
+        ).fetchone()
+        return self._row_to_atom(row) if row is not None else None
+
     def get_atoms_by_ids(self, atom_ids: list[str]) -> list[LedgerAtom]:
         if not atom_ids:
             return []

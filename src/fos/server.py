@@ -46,6 +46,7 @@ class AddAtomRequest(BaseModel):
     meta: dict[str, Any] = Field(default_factory=dict)
     id: str | None = None
     ts: str | None = None
+    stage_only: bool = False
 
 
 class OutboxFlushRequest(BaseModel):
@@ -408,6 +409,7 @@ def create_app(
                 meta=req.meta,
                 atom_id=req.id,
                 ts=req.ts,
+                stage_only=req.stage_only,
             )
         except FosError as exc:
             raise _http_from_fos_error(exc) from exc
@@ -427,6 +429,7 @@ def create_app(
                     meta=item.meta,
                     atom_id=item.id,
                     ts=item.ts,
+                    stage_only=item.stage_only,
                 )
                 accepted.append(res["atom"]["id"])
             except FosError as exc:

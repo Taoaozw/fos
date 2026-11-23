@@ -501,6 +501,8 @@ class FosClient:
         rule: str | None = None,
         rationale: str | None = None,
         compat: dict[str, Any] | None = None,
+        commit_sha: str | None = None,
+        stage_only: bool = False,
     ) -> dict[str, Any]:
         if kind not in VALID_KINDS:
             raise UsageError(f"Invalid kind '{kind}'. Must be one of: {', '.join(VALID_KINDS)}")
@@ -516,6 +518,8 @@ class FosClient:
             meta["entities"] = entities
         if evidence_ref:
             meta["evidence_ref"] = evidence_ref
+        if commit_sha:
+            meta["commit_sha"] = commit_sha
         if trigger_when:
             meta["trigger_when"] = trigger_when
         if source_ref:
@@ -544,6 +548,7 @@ class FosClient:
                     "source": source,
                     "content": content,
                     "meta": meta,
+                    "stage_only": stage_only,
                 },
             )
             if warm is not None:
@@ -555,6 +560,7 @@ class FosClient:
                 source=source,
                 device=self.cfg.device,
                 meta=meta,
+                stage_only=stage_only,
             )
 
         payload = {
@@ -566,6 +572,7 @@ class FosClient:
             "source": source,
             "content": content,
             "meta": meta,
+            "stage_only": stage_only,
         }
         try:
             return self._request(
@@ -666,6 +673,7 @@ class FosClient:
         )
         ingested: list[dict[str, Any]] = []
         queued = 0
+        deduplicated = 0
         for ev in events:
             res = self.add(
                 kind=ev["kind"],
@@ -674,19 +682,25 @@ class FosClient:
                 source=ev["source"],
                 severity=ev["meta"].get("severity"),
                 evidence_ref=ev["meta"].get("evidence_ref"),
+                commit_sha=ev["meta"].get("commit_sha"),
                 source_ref=ev["meta"].get("source_ref"),
                 source_hash=ev["meta"].get("source_hash"),
                 verified_at=ev["meta"].get("verified_at"),
+                stage_only=True,
             )
             if res.get("queued"):
                 queued += 1
+            elif res.get("deduplicated"):
+                deduplicated += 1
             ingested.append(res)
         return {
             "source": source,
             "since": since,
             "collected": len(events),
-            "ingested": len(ingested) - queued,
+            "ingested": len(ingested) - queued - deduplicated,
+            "deduplicated": deduplicated,
             "queued_offline": queued,
+            "staged_for_dream": True,
         }
 
     # --- Brain maintenance operations ---

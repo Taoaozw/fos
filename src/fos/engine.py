@@ -1252,6 +1252,7 @@ class BrainEngine:
         meta: dict[str, Any] | None = None,
         atom_id: str | None = None,
         ts: str | None = None,
+        stage_only: bool = False,
     ) -> dict[str, Any]:
         if kind not in VALID_KINDS:
             raise UsageError(f"Invalid kind '{kind}'. Must be one of: {', '.join(VALID_KINDS)}")
@@ -1276,6 +1277,49 @@ class BrainEngine:
         scope_clean = normalize_scope(scope, strict=source.startswith("manual"))
         raw_clean = content.strip()
         is_lifecycle_op = any(k in meta_clean for k in ("archives", "graduates", "supersedes", "reinforces", "edits"))
+
+        # Cross-device idempotency for automated hindsight ingestion by (scope, evidence_ref|commit_sha)
+        if source.startswith("hindsight:") and not is_lifecycle_op:
+            ev_ref = str(meta_clean.get("evidence_ref") or "").strip()
+            c_sha = str(meta_clean.get("commit_sha") or "").strip()
+            if ev_ref or c_sha:
+                existing_ref = self.ledger.find_atom_by_evidence_ref(
+                    scope_clean,
+                    evidence_ref=ev_ref,
+                    commit_sha=c_sha,
+                )
+                if existing_ref is not None:
+                    return {
+                        "atom": existing_ref.to_dict(),
+                        "node": None,
+                        "superseded": None,
+                        "archived": None,
+                        "graduated": None,
+                        "snapshot_version": self.snapshots.current_version() or "v0001",
+                        "deduplicated": True,
+                    }
+
+        # Stage-only automated ingest: persist raw atom to ledger for `fos dream` distillation
+        # without polluting live active snapshot cards with un-distilled commits/docs.
+        if stage_only and not is_lifecycle_op:
+            atom = LedgerAtom(
+                id=atom_id or new_atom_id(),
+                ts=ts or now_iso(),
+                device=device or self.device,
+                kind=kind,
+                scope=scope_clean,
+                source=source,
+                raw=raw_clean,
+                meta=meta_clean,
+            )
+            persisted = self.ledger.append_atom(atom)
+            return {
+                "atom": persisted.to_dict(),
+                "node": None,
+                "staged": True,
+                "redacted": bool(persisted.meta.get("redacted_types")),
+                "snapshot_version": self.snapshots.current_version() or "v0001",
+            }
 
         # Titans-style surprise & conflict gate against active same-scope/global memories
         surprise_info: dict[str, Any] = {

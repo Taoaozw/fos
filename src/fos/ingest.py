@@ -417,13 +417,25 @@ _DOC_INJECTED_BLOCK_RE = re.compile(
     re.IGNORECASE,
 )
 _REPO_DOC_NAMES: tuple[str, ...] = (
-    "AGENTS.md",
-    "CLAUDE.md",
     "LESSONS.md",
     "docs/FRONTEND.md",
     "docs/DESIGN.md",
     "docs/ARCHITECTURE.md",
 )
+
+# Generic agent etiquette / system-prompt boilerplate that should never enter long-term memory
+_GENERIC_AGENT_ETIQUETTE_RE = re.compile(
+    r"(?:reply in simplified chinese|use english for (?:code comments|search queries|tool calls)|"
+    r"inspect relevant code before planning|verify changes before concluding|"
+    r"do not (?:change|modify) unrelated (?:files|modules)|always follow without any exception)",
+    re.IGNORECASE,
+)
+
+
+def _is_generic_agent_etiquette(body: str) -> bool:
+    """Return True when a doc section is mostly generic agent etiquette boilerplate."""
+    matches = _GENERIC_AGENT_ETIQUETTE_RE.findall(body)
+    return len(matches) >= 2
 
 
 def _strip_doc_tool_boilerplate(text: str) -> str:
@@ -551,6 +563,8 @@ def _collect_docs_events(
             if len(events) >= limit:
                 completed_file = False
                 break
+            if _is_generic_agent_etiquette(body):
+                continue
             payload_text = f"Hindsight: [{fpath.name} · {heading}]\n{body}"
             red = redact_secrets(payload_text)
             events.append(

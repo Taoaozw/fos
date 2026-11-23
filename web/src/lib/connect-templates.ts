@@ -120,7 +120,6 @@ export function buildRemoteIngestManualCommands(gitRoot?: string): string {
   return [
     "fos ingest --from all --since 48h --json",
     `fos ingest --from git --root ${root} --since 48h --limit 30 --json`,
-    `fos ingest --from docs --root ${root} --limit 30 --json`,
     "fos sync --json",
   ].join("\n")
 }
@@ -140,7 +139,6 @@ export function buildRemoteIngestLaunchdScript(gitRoot?: string): string {
     "fos ingest --from all --since 48h --limit 25 --json || true",
     'if [ -d "$GIT_ROOT" ]; then',
     '  fos ingest --from git --root "$GIT_ROOT" --since 48h --limit 30 --json || true',
-    '  fos ingest --from docs --root "$GIT_ROOT" --limit 30 --json || true',
     "fi",
     "fos sync --json || true",
     "EOF",

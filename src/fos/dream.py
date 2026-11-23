@@ -70,7 +70,8 @@ Apply the STRICT **6-Month Half-Life Test**: "Will this knowledge still prevent 
 DROP (keep = false) IMMEDIATELY if the episode is ANY of:
 1. Single-ticket ops firefighting, specific vendor/customer/account incidents, temporary third-party outages, or one-off metrics/row counts (e.g. "15 days exported 2,228 rows", "account #1928 returned 400", "OR_BACR2_59", "swap account A to B").
 2. Transient tool/environment glitches or bare questions without a durable generalizable rule.
-3. Trivial task requests that do not express a reusable preference, pitfall, or architectural trade-off.
+3. Trivial task requests or minor one-off UI/layout/naming commits (e.g., preventing badge text overlap, passing a prop/helper ID, tweaking labels or toolbar alignment) that do not teach a reusable root cause or architectural invariant.
+4. Generic AI agent prompt etiquette or repo-root AGENTS.md / CLAUDE.md boilerplate (e.g., "Reply in Simplified Chinese", "Use English for search queries/tool calls", "Inspect before editing", "Verify before concluding", "Do not modify unrelated files") — ONLY keep an AGENTS.md/CLAUDE.md rule if it encodes a concrete, promotable technical/architectural constraint that generalizes across projects.
 
 KEEP (keep = true) ONLY high-compounding, settled knowledge in 3 categories:
 1. `principle` (scope="global"): User's durable engineering taste, coding rules, frontend/backend stack preferences, or workflow redlines (e.g., "Prefer CLI + embedded Skill over MCP", "Use shadcn Base UI + semantic theme tokens, no raw HTML UI elements or hardcoded palette colors", "Prefer smallest viable local change & orthogonal primitives", "Use Guard Tests over verbal reminders").

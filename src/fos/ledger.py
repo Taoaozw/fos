@@ -75,6 +75,16 @@ class LedgerStore:
         with StateDB(self.data_dir) as db:
             return db.get_atom(atom_id)
 
+    def find_atom_by_evidence_ref(
+        self,
+        scope: str,
+        *,
+        evidence_ref: str = "",
+        commit_sha: str = "",
+    ) -> LedgerAtom | None:
+        with StateDB(self.data_dir) as db:
+            return db.find_atom_by_evidence_ref(scope, evidence_ref=evidence_ref, commit_sha=commit_sha)
+
     def get_atoms_by_ids(self, atom_ids: list[str]) -> list[LedgerAtom]:
         if not atom_ids:
             return []

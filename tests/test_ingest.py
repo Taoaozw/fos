@@ -167,10 +167,15 @@ def test_ingest_git_and_high_signal_chat_collectors(tmp_path: Path) -> None:
     assert fops_events[0]["kind"] == "lesson"
     assert fops_events[0]["scope"] == "fops"
 
-    # 7. docs collector (AGENTS.md / docs/agents/*.md with context7 boilerplate stripped & SHA cursor)
+    # 7. docs collector (LESSONS.md / docs/agents/*.md with context7 boilerplate stripped & SHA cursor;
+    #    repo-root AGENTS.md / CLAUDE.md skipped so local agent wrappers never pollute memory)
     doc_dir = tmp_path / "design-repo"
     (doc_dir / "docs" / "agents").mkdir(parents=True)
     (doc_dir / "AGENTS.md").write_text(
+        "# Project instructions\n- Reply in Simplified Chinese. Use English for code comments.\n",
+        encoding="utf-8",
+    )
+    (doc_dir / "LESSONS.md").write_text(
         "# 代码规范\n\n## 前端规范\n所有 UI 一律使用 shadcn Base UI 组件和语义主题 Token，禁止写死十六进制颜色或 Tailwind 调色板颜色。\n"
         "<!-- context7 -->\nUse ctx7 CLI boilerplate\n<!-- context7 -->\n",
         encoding="utf-8",
@@ -181,10 +186,11 @@ def test_ingest_git_and_high_signal_chat_collectors(tmp_path: Path) -> None:
         "## 状态边界\n" + ("表单验证必须返回可枚举的错误码，不得静默吞掉错误。" * 25) + "\n",
         encoding="utf-8",
     )
-    # Limit=2 takes AGENTS.md (1 section) + first section of frontend-conventions.md;
-    # frontend-conventions.md must NOT be marked complete in cursor until fully emitted
+    # Limit=2 takes LESSONS.md (1 section) + first section of frontend-conventions.md;
+    # AGENTS.md is skipped; frontend-conventions.md must NOT be marked complete in cursor until fully emitted
     partial = collect_hindsight_events("docs", root_dir=doc_dir, cursor_path=cursor_path, limit=2)
     assert len(partial) == 2
+    assert all("AGENTS.md" not in e["raw"] for e in partial)
     assert all("ctx7 CLI boilerplate" not in e["raw"] for e in partial)
     doc_events = collect_hindsight_events("docs", root_dir=doc_dir, cursor_path=cursor_path, limit=10)
     assert len(doc_events) == 2
@@ -278,7 +284,7 @@ def test_ingest_multi_repo_workspace_skips_third_party_clones(tmp_path: Path, mo
         subprocess.run(["git", "-C", str(path), "init", "-q"], check=True)
         subprocess.run(["git", "-C", str(path), "config", "user.name", author], check=True)
         subprocess.run(["git", "-C", str(path), "config", "user.email", email], check=True)
-        (path / "AGENTS.md").write_text(doc_text, encoding="utf-8")
+        (path / "LESSONS.md").write_text(doc_text, encoding="utf-8")
         subprocess.run(["git", "-C", str(path), "add", "."], check=True)
         subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", "init"], check=True)
 
@@ -299,3 +305,36 @@ def test_ingest_multi_repo_workspace_skips_third_party_clones(tmp_path: Path, mo
     scopes = {e["scope"] for e in events}
     assert "my-app" in scopes
     assert "third-party-litellm" not in scopes
+
+
+def test_cross_device_evidence_ref_dedup_and_stage_only_ingest(tmp_path: Path) -> None:
+    from fos.engine import BrainEngine
+
+    engine = BrainEngine(tmp_path / "brain")
+    r1 = engine.add_atom(
+        kind="lesson",
+        scope="fops",
+        source="hindsight:git:fops",
+        device="m3-max",
+        content="Hindsight: fix(mw): bypass pgx local DNS lookup for SSH-tunneled PG hosts",
+        meta={"evidence_ref": "git:3b9d4d7", "commit_sha": "3b9d4d7abcdef"},
+        stage_only=True,
+    )
+    assert r1["staged"] is True
+    assert r1["node"] is None
+    # Active snapshot remains unpolluted until `fos dream`
+    with engine.snapshots.open_current(read_only=True) as db:
+        assert db.list_nodes(scope="fops") == []
+
+    # Second device reporting the exact same commit SHA / evidence_ref is deduplicated
+    r2 = engine.add_atom(
+        kind="lesson",
+        scope="fops",
+        source="hindsight:git:fops",
+        device="macbook-pro",
+        content="Hindsight: fix(mw): bypass pgx local DNS lookup for SSH-tunneled PG hosts",
+        meta={"evidence_ref": "git:3b9d4d7", "commit_sha": "3b9d4d7abcdef"},
+        stage_only=True,
+    )
+    assert r2["deduplicated"] is True
+    assert len(engine.ledger.load_all_atoms()) == 1

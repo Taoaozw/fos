@@ -311,11 +311,26 @@ def _eval_fidelity(
     required_total = 0
     failures: list[dict[str, Any]] = []
 
-    # 1. Explicit must_preserve_terms from golden cases
+    # 1. Explicit must_preserve_terms from golden cases (resolve by evidence_ids first so re-numbered dream snapshots match the right card)
+    atom_to_nodes: dict[str, list[str]] = {}
+    for n in nodes:
+        for eid in n.evidence_ids:
+            atom_to_nodes.setdefault(eid, []).append(n.id)
+
     case_terms_by_node: dict[str, list[str]] = {}
     for c in cases:
-        if c.node_id and c.must_preserve_terms:
-            case_terms_by_node.setdefault(c.node_id, []).extend(c.must_preserve_terms)
+        if not c.must_preserve_terms:
+            continue
+        target_ids: list[str] = []
+        if c.evidence_ids:
+            for eid in c.evidence_ids:
+                for nid in atom_to_nodes.get(eid, []):
+                    if nid not in target_ids:
+                        target_ids.append(nid)
+        elif c.node_id:
+            target_ids.append(c.node_id)
+        for tid in target_ids:
+            case_terms_by_node.setdefault(tid, []).extend(c.must_preserve_terms)
 
     for node in nodes:
         # Fidelity gate enforces strict constraint preservation on manual/P0/pinned nodes
