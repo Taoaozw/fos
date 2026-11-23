@@ -2,12 +2,14 @@ import { useMemo, useRef, useState } from "react"
 import {
   IconAlertTriangle,
   IconCheck,
+  IconClockPlay,
   IconCloudDownload,
   IconCopy,
   IconDevices,
   IconEye,
   IconEyeOff,
   IconInfoCircle,
+  IconPlugConnectedX,
   IconRefresh,
   IconRobot,
   IconShieldLock,
@@ -26,13 +28,20 @@ import { Kbd } from "@/components/ui/kbd"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   DEFAULT_BRAIN_PORT,
+  DEFAULT_REMOTE_GIT_ROOT,
   TOKEN_PLACEHOLDER,
   VITE_DEV_PORT,
   buildAgentSetupPrompt,
+  buildAgentUnbindPrompt,
   buildAgentWorkflowPrompt,
   buildCurlExamples,
+  buildFullUninstallCommands,
   buildInstallCommand,
   buildManualCommands,
+  buildRemoteIngestCronCommand,
+  buildRemoteIngestLaunchdScript,
+  buildRemoteIngestManualCommands,
+  buildUnbindOnlyCommands,
   isLoopbackUrl,
   isViteDevUrl,
   normalizeBrainUrl,
@@ -158,8 +167,12 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
   }, [])
 
   const [brainUrl, setBrainUrl] = useState<string>(defaultOrigin)
+  const [remoteGitRoot, setRemoteGitRoot] = useState<string>(DEFAULT_REMOTE_GIT_ROOT)
   const [includeRealToken, setIncludeRealToken] = useState<boolean>(false)
+  const [promptTab, setPromptTab] = useState<string>("setup")
   const [methodTab, setMethodTab] = useState<string>("one-line")
+  const [ingestTab, setIngestTab] = useState<string>("launchd")
+  const [unbindTab, setUnbindTab] = useState<string>("unbind")
   const containerRef = useRef<HTMLDivElement | null>(null)
 
   useRevealGroup(containerRef, "[data-anim='connect-card']", [], {
@@ -186,10 +199,26 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
     [effectiveUrl, effectiveToken]
   )
   const setupPrompt = useMemo(
-    () => buildAgentSetupPrompt(effectiveUrl, effectiveToken),
-    [effectiveUrl, effectiveToken]
+    () => buildAgentSetupPrompt(effectiveUrl, effectiveToken, remoteGitRoot),
+    [effectiveUrl, effectiveToken, remoteGitRoot]
   )
   const workflowPrompt = useMemo(() => buildAgentWorkflowPrompt(), [])
+  const unbindPrompt = useMemo(() => buildAgentUnbindPrompt(), [])
+
+  const ingestManualCmds = useMemo(
+    () => buildRemoteIngestManualCommands(remoteGitRoot),
+    [remoteGitRoot]
+  )
+  const ingestLaunchdScript = useMemo(
+    () => buildRemoteIngestLaunchdScript(remoteGitRoot),
+    [remoteGitRoot]
+  )
+  const ingestCronCmd = useMemo(
+    () => buildRemoteIngestCronCommand(remoteGitRoot),
+    [remoteGitRoot]
+  )
+  const unbindOnlyCmds = useMemo(() => buildUnbindOnlyCommands(), [])
+  const fullUninstallCmds = useMemo(() => buildFullUninstallCommands(), [])
 
   return (
     <div ref={containerRef} className="flex flex-col gap-4">
@@ -202,10 +231,10 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
             </span>
             <div>
               <h2 className="text-[15px] font-semibold tracking-tight text-foreground">
-                在另一台电脑接入 FlowOS
+                在另一台电脑接入 / 管理 FlowOS
               </h2>
               <p className="text-xs text-muted-foreground">
-                将另一台 Mac / Linux 设备的 CLI 与 AI Agent 绑定到当前常驻大脑，自动同步离线缓存与 Skill
+                将另一台 Mac / Linux 的 CLI 与 AI Agent 绑定到常驻大脑，支持定时采集本机 Session/Git 上报与一键安全解绑
               </p>
             </div>
           </div>
@@ -229,17 +258,14 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
           </div>
         </div>
 
-        {/* Interactive URL + Token controls */}
+        {/* Interactive URL + Token + Remote Git Root controls */}
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
-          <div className="flex flex-col gap-1.5 lg:col-span-7">
+          <div className="flex flex-col gap-1.5 lg:col-span-5">
             <label
               htmlFor="fos-brain-url"
               className="flex items-center justify-between text-xs font-medium text-foreground"
             >
               <span>大脑访问地址（Brain URL）</span>
-              <span className="font-normal text-muted-foreground">
-                下方所有安装命令与 Agent Prompt 会实时同步此地址
-              </span>
             </label>
             <div className="flex items-center gap-2">
               <Input
@@ -264,7 +290,23 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
             </div>
           </div>
 
-          <div className="flex flex-col gap-1.5 lg:col-span-5">
+          <div className="flex flex-col gap-1.5 lg:col-span-3">
+            <label
+              htmlFor="fos-remote-git-root"
+              className="flex items-center justify-between text-xs font-medium text-foreground"
+            >
+              <span>远端代码目录（定时扫 Git 用）</span>
+            </label>
+            <Input
+              id="fos-remote-git-root"
+              value={remoteGitRoot}
+              onChange={(e) => setRemoteGitRoot(e.target.value)}
+              placeholder="~/projects"
+              className="font-mono text-xs"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5 lg:col-span-4">
             <span className="text-xs font-medium text-foreground">Token 填充方式</span>
             <div className="flex h-9 items-center justify-between gap-2 rounded-lg border border-border/80 bg-muted/35 px-3">
               <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
@@ -286,7 +328,7 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
                   {includeRealToken ? (
                     <>
                       <IconEyeOff className="size-3.5" />
-                      隐藏为占位符
+                      隐藏
                     </>
                   ) : (
                     <>
@@ -355,7 +397,7 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
         )}
       </section>
 
-      {/* 2. Agent Prompts (Primary Action for Another Computer) */}
+      {/* 2. Agent Prompts (Setup + Daily Workflow + Unbind/Uninstall) */}
       <section data-anim="connect-card" className="surface-card flex flex-col gap-4 p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="flex items-center gap-3">
@@ -372,65 +414,106 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
                 </Badge>
               </div>
               <p className="text-xs text-muted-foreground">
-                把「首次接入 Prompt」发给那边电脑的 Claude Code / Cursor / Codex / Antigravity，即可自动完成安装、绑定与验收
+                覆盖「首次接入 + 配置定时采集」「日常协作规范」「安全解绑 / 卸载」三类完整指令；安装 Skill 后 Agent 也能从内置文档自动识别
               </p>
             </div>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-          {/* Prompt A: Setup */}
-          <div className="flex flex-col overflow-hidden rounded-xl border border-border/80 bg-card">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/70 bg-muted/35 px-3.5 py-2.5">
-              <div className="flex items-center gap-2">
-                <IconSparkles className="size-4 text-chart-4" />
-                <div>
-                  <div className="text-xs font-semibold text-foreground">
-                    Prompt 1 · 首次接入与自动安装
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    发给另一台电脑的 Agent，一次性完成连通检查、安装 CLI、同步缓存与装 Skill
-                  </div>
-                </div>
-              </div>
-              <CopyButton
-                text={setupPrompt}
-                label="复制安装 Prompt"
-                successMessage="已复制「首次接入安装 Prompt」"
-                variant="default"
-              />
-            </div>
-            <pre className="max-h-96 flex-1 overflow-auto whitespace-pre-wrap break-words bg-muted/20 p-3.5 font-mono text-[12px] leading-relaxed text-foreground">
-              {setupPrompt}
-            </pre>
-          </div>
+        <Tabs value={promptTab} onValueChange={setPromptTab} className="flex flex-col gap-3">
+          <TabsList className="w-fit flex-wrap">
+            <TabsTrigger value="setup" className="text-xs">
+              Prompt 1 · 首次接入 &amp; 定时采集
+            </TabsTrigger>
+            <TabsTrigger value="workflow" className="text-xs">
+              Prompt 2 · 日常协作规范
+            </TabsTrigger>
+            <TabsTrigger value="unbind" className="text-xs">
+              Prompt 3 · 解绑 / 卸载
+            </TabsTrigger>
+          </TabsList>
 
-          {/* Prompt B: Daily Workflow */}
-          <div className="flex flex-col overflow-hidden rounded-xl border border-border/80 bg-card">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/70 bg-muted/35 px-3.5 py-2.5">
-              <div className="flex items-center gap-2">
-                <IconTerminal2 className="size-4 text-chart-2" />
-                <div>
-                  <div className="text-xs font-semibold text-foreground">
-                    Prompt 2 · 日常协作规范（可选贴入全局 Rules）
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    若那边 Agent 不支持自动加载 Skill，或想在会话开头显式约束用法时使用
+          <TabsContent value="setup">
+            <div className="flex flex-col overflow-hidden rounded-xl border border-border/80 bg-card">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/70 bg-muted/35 px-3.5 py-2.5">
+                <div className="flex items-center gap-2">
+                  <IconSparkles className="size-4 text-chart-4" />
+                  <div>
+                    <div className="text-xs font-semibold text-foreground">
+                      首次接入、安装 Skill 并配置本机 Session/Git 定时采集
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      直接发给另一台电脑的 Claude Code / Cursor / Codex / Antigravity，一站式完成安装与定时上报
+                    </div>
                   </div>
                 </div>
+                <CopyButton
+                  text={setupPrompt}
+                  label="复制安装 Prompt"
+                  successMessage="已复制「首次接入与定时采集 Prompt」"
+                  variant="default"
+                />
               </div>
-              <CopyButton
-                text={workflowPrompt}
-                label="复制协作 Prompt"
-                successMessage="已复制「日常协作规范 Prompt」"
-                variant="outline"
-              />
+              <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words bg-muted/20 p-3.5 font-mono text-[12px] leading-relaxed text-foreground">
+                {setupPrompt}
+              </pre>
             </div>
-            <pre className="max-h-96 flex-1 overflow-auto whitespace-pre-wrap break-words bg-muted/20 p-3.5 font-mono text-[12px] leading-relaxed text-foreground">
-              {workflowPrompt}
-            </pre>
-          </div>
-        </div>
+          </TabsContent>
+
+          <TabsContent value="workflow">
+            <div className="flex flex-col overflow-hidden rounded-xl border border-border/80 bg-card">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/70 bg-muted/35 px-3.5 py-2.5">
+                <div className="flex items-center gap-2">
+                  <IconTerminal2 className="size-4 text-chart-2" />
+                  <div>
+                    <div className="text-xs font-semibold text-foreground">
+                      日常协作规范（可选贴入全局 Rules / CLAUDE.md / AGENTS.md）
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      若那边 Agent 不支持自动加载 Skill，或想在会话开头显式约束用法时使用
+                    </div>
+                  </div>
+                </div>
+                <CopyButton
+                  text={workflowPrompt}
+                  label="复制协作 Prompt"
+                  successMessage="已复制「日常协作规范 Prompt」"
+                  variant="outline"
+                />
+              </div>
+              <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words bg-muted/20 p-3.5 font-mono text-[12px] leading-relaxed text-foreground">
+                {workflowPrompt}
+              </pre>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="unbind">
+            <div className="flex flex-col overflow-hidden rounded-xl border border-border/80 bg-card">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/70 bg-muted/35 px-3.5 py-2.5">
+                <div className="flex items-center gap-2">
+                  <IconPlugConnectedX className="size-4 text-chart-5" />
+                  <div>
+                    <div className="text-xs font-semibold text-foreground">
+                      安全解绑大脑 / 完全卸载客户端
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      让那边 Agent 先冲刷离线 outbox、停用定时采集、再清除 Token/缓存或彻底卸载 CLI 与 Skill
+                    </div>
+                  </div>
+                </div>
+                <CopyButton
+                  text={unbindPrompt}
+                  label="复制解绑 Prompt"
+                  successMessage="已复制「解绑 / 卸载 Prompt」"
+                  variant="outline"
+                />
+              </div>
+              <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words bg-muted/20 p-3.5 font-mono text-[12px] leading-relaxed text-foreground">
+                {unbindPrompt}
+              </pre>
+            </div>
+          </TabsContent>
+        </Tabs>
       </section>
 
       {/* 3. Connection Methods */}
@@ -450,7 +533,7 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
         </div>
 
         <Tabs value={methodTab} onValueChange={setMethodTab} className="flex flex-col gap-3">
-          <TabsList className="w-fit">
+          <TabsList className="w-fit flex-wrap">
             <TabsTrigger value="one-line" className="text-xs">
               方式一：一键脚本（推荐）
             </TabsTrigger>
@@ -509,7 +592,121 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
         </Tabs>
       </section>
 
-      {/* 4. Practical Tips & Troubleshooting */}
+      {/* 4. Remote Device Scheduled Session / Git Ingest */}
+      <section data-anim="connect-card" className="surface-card flex flex-col gap-4 p-5">
+        <div className="flex items-center gap-3">
+          <span className="icon-tile size-9 text-chart-3">
+            <IconClockPlay className="size-4" />
+          </span>
+          <div>
+            <h2 className="text-[15px] font-semibold tracking-tight text-foreground">
+              远端设备定时采集本机 Session / Git（可选）
+            </h2>
+            <p className="text-xs text-muted-foreground">
+              一键安装默认不会在另一台电脑创建后台定时任务；若希望把那台电脑的 AI 会话与 Git 踩坑记录也自动汇总回大脑，按系统配置如下定时采集即可
+            </p>
+          </div>
+        </div>
+
+        <Tabs value={ingestTab} onValueChange={setIngestTab} className="flex flex-col gap-3">
+          <TabsList className="w-fit flex-wrap">
+            <TabsTrigger value="launchd" className="text-xs">
+              macOS（launchd · 推荐）
+            </TabsTrigger>
+            <TabsTrigger value="cron" className="text-xs">
+              Linux / 服务器（cron）
+            </TabsTrigger>
+            <TabsTrigger value="manual-ingest" className="text-xs">
+              手动立即采集
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="launchd" className="flex flex-col gap-2.5">
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              每 6 小时自动扫描本机 AI 会话（Claude / Codex / Antigravity / Pi 等）与 <Kbd>{remoteGitRoot || DEFAULT_REMOTE_GIT_ROOT}</Kbd> 下的 Git 提交，并增量上报到大脑；MacBook 合盖休眠唤醒后会自动补跑。<strong>无需</strong>在客户端运行 <Kbd>fos dream</Kbd>，M3 Max 大脑每晚会统一蒸馏编译。
+            </p>
+            <CodeBlock
+              title="macOS launchd 一键配置脚本"
+              code={ingestLaunchdScript}
+              copyLabel="复制配置脚本"
+            />
+          </TabsContent>
+
+          <TabsContent value="cron" className="flex flex-col gap-2.5">
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              适用于 Linux 服务器或习惯使用 <Kbd>crontab</Kbd> 的环境，带 <Kbd># fos-client-ingest</Kbd> 标记以便后续一键清理。
+            </p>
+            <CodeBlock
+              title="Linux crontab 一键配置命令"
+              code={ingestCronCmd}
+              copyLabel="复制 cron 命令"
+            />
+          </TabsContent>
+
+          <TabsContent value="manual-ingest" className="flex flex-col gap-2.5">
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              随时在另一台电脑手动触发一次增量采集并同步回大脑（内置游标去重，断网时自动写入本地 <Kbd>outbox.jsonl</Kbd>）。
+            </p>
+            <CodeBlock
+              title="手动采集与同步命令"
+              code={ingestManualCmds}
+              copyLabel="复制采集命令"
+            />
+          </TabsContent>
+        </Tabs>
+      </section>
+
+      {/* 5. Unbind & Full Uninstall */}
+      <section data-anim="connect-card" className="surface-card flex flex-col gap-4 p-5">
+        <div className="flex items-center gap-3">
+          <span className="icon-tile size-9 text-chart-5">
+            <IconPlugConnectedX className="size-4" />
+          </span>
+          <div>
+            <h2 className="text-[15px] font-semibold tracking-tight text-foreground">
+              解绑远端大脑与完全卸载
+            </h2>
+            <p className="text-xs text-muted-foreground">
+              切换设备、更换 Token 或不再需要在某台电脑使用 FlowOS 时，可按需选择「仅解绑」或「完全卸载」（仅清理当前客户端，不影响大脑主机数据）
+            </p>
+          </div>
+        </div>
+
+        <Tabs value={unbindTab} onValueChange={setUnbindTab} className="flex flex-col gap-3">
+          <TabsList className="w-fit flex-wrap">
+            <TabsTrigger value="unbind" className="text-xs">
+              仅解绑远端大脑（保留 CLI）
+            </TabsTrigger>
+            <TabsTrigger value="uninstall" className="text-xs">
+              完全卸载（CLI + Skill + 配置）
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="unbind" className="flex flex-col gap-2.5">
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              先冲刷本地未上传的 <Kbd>outbox.jsonl</Kbd>，停用本机定时采集任务，并删除 <Kbd>~/.fos/config.json</Kbd>（含明文 Token）与离线缓存。
+            </p>
+            <CodeBlock
+              title="仅解绑远端大脑"
+              code={unbindOnlyCmds}
+              copyLabel="复制解绑命令"
+            />
+          </TabsContent>
+
+          <TabsContent value="uninstall" className="flex flex-col gap-2.5">
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              在解绑与停用定时采集的基础上，同步清理各 AI 工具目录中的 <Kbd>fos</Kbd> Skill、卸载 <Kbd>fos</Kbd> CLI 并删除 <Kbd>~/.fos</Kbd> 目录。
+            </p>
+            <CodeBlock
+              title="完全卸载 FlowOS 客户端"
+              code={fullUninstallCmds}
+              copyLabel="复制卸载命令"
+            />
+          </TabsContent>
+        </Tabs>
+      </section>
+
+      {/* 6. Practical Tips & Troubleshooting */}
       <section data-anim="connect-card" className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <div className="surface-card flex items-start gap-3 p-4">
           <span className="icon-tile size-8 shrink-0 text-chart-1">

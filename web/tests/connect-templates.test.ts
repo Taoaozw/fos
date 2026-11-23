@@ -1,12 +1,19 @@
 import { describe, expect, test } from "bun:test"
 import {
+  CLIENT_INGEST_LABEL,
   FALLBACK_BRAIN_URL,
   TOKEN_PLACEHOLDER,
   buildAgentSetupPrompt,
+  buildAgentUnbindPrompt,
   buildAgentWorkflowPrompt,
   buildCurlExamples,
+  buildFullUninstallCommands,
   buildInstallCommand,
   buildManualCommands,
+  buildRemoteIngestCronCommand,
+  buildRemoteIngestLaunchdScript,
+  buildRemoteIngestManualCommands,
+  buildUnbindOnlyCommands,
   isLoopbackUrl,
   isViteDevUrl,
   normalizeBrainUrl,
@@ -82,5 +89,42 @@ describe("connect-templates", () => {
     expect(wf).toContain("fos recall")
     expect(wf).toContain("fos add")
     expect(wf).toContain("fos sync")
+  })
+
+  test("remote ingest templates include git root, client ingest label, and sync without dream", () => {
+    const manual = buildRemoteIngestManualCommands("~/work")
+    expect(manual).toContain("fos ingest --from all --since 48h --json")
+    expect(manual).toContain("fos ingest --from git --root ~/work --since 48h --limit 30 --json")
+    expect(manual).toContain("fos sync --json")
+
+    const launchd = buildRemoteIngestLaunchdScript("~/work")
+    expect(launchd).toContain(CLIENT_INGEST_LABEL)
+    expect(launchd).toContain("launchctl load")
+    expect(launchd).toContain("$HOME/work")
+
+    const cron = buildRemoteIngestCronCommand("~/work")
+    expect(cron).toContain("# fos-client-ingest")
+    expect(cron).toContain("crontab")
+    expect(cron).toContain("$HOME/work")
+  })
+
+  test("unbind, full uninstall, and agent unbind prompt flush outbox and clean schedules/token", () => {
+    const unbind = buildUnbindOnlyCommands()
+    expect(unbind).toContain("fos sync --json || true")
+    expect(unbind).toContain(CLIENT_INGEST_LABEL)
+    expect(unbind).toContain("rm -f ~/.fos/config.json")
+    expect(unbind).not.toContain("uv tool uninstall fos")
+
+    const uninstall = buildFullUninstallCommands()
+    expect(uninstall).toContain("fos sync --json || true")
+    expect(uninstall).toContain("uv tool uninstall fos")
+    expect(uninstall).toContain("~/.claude/skills/fos")
+    expect(uninstall).toContain("rm -rf ~/.fos")
+
+    const prompt = buildAgentUnbindPrompt()
+    expect(prompt).toContain("仅解绑远端大脑")
+    expect(prompt).toContain("完全卸载")
+    expect(prompt).toContain("fos sync --json")
+    expect(prompt).toContain(CLIENT_INGEST_LABEL)
   })
 })

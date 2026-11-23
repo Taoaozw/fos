@@ -56,6 +56,23 @@ fos sync --json
 fos status [--offline] --json
 fos skill install [--dir DIR] [--refresh-only] --json
 fos update [--check] [--json]
+
+# Remote device scheduled session/git ingest (run on portable Mac / Linux client; brain runs nightly dream centrally)
+fos ingest --from all --since 48h --limit 25 --json
+fos ingest --from git --root ~/projects --since 48h --limit 30 --json
+fos sync --json
+
+# Unbind remote brain (flush outbox, stop client ingest job, clear token & cache; keeps CLI)
+fos sync --json || true
+launchctl unload ~/Library/LaunchAgents/com.clive.fos-client-ingest.plist 2>/dev/null || true
+rm -f ~/Library/LaunchAgents/com.clive.fos-client-ingest.plist ~/.fos/bin/fos-client-ingest.sh
+(crontab -l 2>/dev/null | grep -v '# fos-client-ingest' | crontab -) 2>/dev/null || true
+rm -rf ~/.fos/config.json ~/.fos/cache
+
+# Full client uninstall (in addition to unbind above)
+rm -rf ~/.gemini/config/skills/fos ~/.claude/skills/fos ~/.codex/skills/fos ~/.agents/skills/fos ~/.cursor/skills/fos ~/.pi/agent/skills/fos
+uv tool uninstall fos || true
+rm -rf ~/.fos
 ```
 
 - When the brain advertises a newer CLI wheel (`X-Fos-Version`), `fos` silently triggers a debounced background self-update (`FOS_NO_AUTOUPDATE=1` disables it), verifies SHA-256, and automatically refreshes installed `SKILL.md` files via `fos skill install --refresh-only`.
