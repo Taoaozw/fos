@@ -36,6 +36,7 @@ from fos.models import (
     parse_timestamp,
 )
 from fos.providers import ProviderBundle, build_providers
+from fos.redact import redact_secrets
 from fos.scopes import (
     canonical_repo_name,
     is_repo_root_ambient_doc,
@@ -120,6 +121,92 @@ def _condense_l0_summary(rule: str, max_tokens: int = 26) -> str:
                     merged = sub
                 return truncate_to_tokens(merged, max_tokens)
     return truncate_to_tokens(cleaned, max_tokens)
+
+
+EDITABLE_NODE_FIELDS: tuple[str, ...] = (
+    "rule",
+    "rationale",
+    "scope",
+    "severity",
+    "type",
+    "guard_hint",
+    "guard_pattern",
+    "source_ref",
+    "trigger_when",
+    "entities",
+)
+
+
+def _clean_string_list(items: list[str] | None, *, redact: bool = False) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in items or []:
+        val = str(raw).strip()
+        if redact and val:
+            val = redact_secrets(val).text.strip()
+        if val and val not in seen:
+            seen.add(val)
+            out.append(val)
+    return out
+
+
+def apply_node_edit_patch(
+    target: CompiledNode,
+    meta: dict[str, Any],
+    *,
+    ts: str,
+    atom_id: str,
+) -> tuple[bool, str | None]:
+    """Apply an immutable `manual:edit` patch to `target` in place.
+
+    Shared by live compilation (`BrainEngine._compile_atom_into_db`) and sleep
+    replay (`dream._compile_dream_nodes`) so edited cards survive dream rebuilds.
+    Returns `(scope_changed, old_scope)`.
+    """
+    raw_fields = meta.get("edit_fields")
+    fields = set(str(f) for f in raw_fields) if isinstance(raw_fields, list) else {
+        f for f in EDITABLE_NODE_FIELDS if f in meta
+    }
+    old_scope = target.scope
+
+    if "type" in fields:
+        new_type = str(meta.get("type") or "").strip()
+        if new_type in VALID_KINDS:
+            target.type = new_type
+    if "scope" in fields:
+        new_scope = str(meta.get("scope") or "").strip()
+        if new_scope:
+            target.scope = normalize_scope(new_scope, strict=False)
+    if "severity" in fields:
+        new_sev = str(meta.get("severity") or "").strip()
+        if new_sev:
+            target.severity = normalize_severity(new_sev, kind=target.type)
+    if "rule" in fields:
+        new_rule = str(meta.get("rule") or "").strip()
+        if new_rule:
+            target.rule = new_rule
+    if "rationale" in fields:
+        target.rationale = str(meta.get("rationale") or "").strip()
+    if "guard_hint" in fields:
+        target.guard_hint = str(meta.get("guard_hint") or "").strip()
+    if "guard_pattern" in fields:
+        target.guard_pattern = str(meta.get("guard_pattern") or "").strip()
+    if "source_ref" in fields:
+        new_ref = str(meta.get("source_ref") or "").strip()
+        if new_ref != target.source_ref:
+            target.source_ref = new_ref
+            target.source_hash = ""
+            target.verified_at = ts[:10] if (new_ref and len(ts) >= 10) else ""
+    if "trigger_when" in fields:
+        target.trigger_when = _clean_string_list(list(meta.get("trigger_when") or []))
+    if "entities" in fields:
+        target.entities = _clean_string_list(list(meta.get("entities") or []))
+
+    if atom_id and atom_id not in target.evidence_ids:
+        target.evidence_ids.append(atom_id)
+    target.l0 = build_l0_line(target)
+    target.updated_at = ts
+    return target.scope != old_scope, old_scope
 
 
 def build_l0_line(node: CompiledNode) -> str:
@@ -968,6 +1055,29 @@ class BrainEngine:
                 db.upsert_node(target, embedding=emb)
             return None, target
 
+        # Pure in-place edit transition recorded as an immutable ledger event
+        edit_target_id = meta.get("edits")
+        if edit_target_id:
+            target = db.get_node(str(edit_target_id))
+            if target is not None:
+                scope_changed, _old_scope = apply_node_edit_patch(
+                    target, meta, ts=atom.ts, atom_id=atom.id
+                )
+                emb = self.providers.embedder.embed([node_embedding_text(target)])[0]
+                db.upsert_node(target, embedding=emb)
+                if scope_changed:
+                    db.expire_scope_edges(target.id, atom.ts)
+                    if target.scope and target.scope != "global":
+                        db.add_edge(
+                            GraphEdge(
+                                src_id=target.id,
+                                dst_id=f"scope:{target.scope}",
+                                edge_type="APPLIES_TO",
+                                valid_from=atom.ts,
+                            )
+                        )
+            return target, None
+
         # Pure reinforcement transition (Titans low-surprise redundant automated sighting)
         reinforce_target_id = meta.get("reinforces")
         if reinforce_target_id:
@@ -1151,7 +1261,7 @@ class BrainEngine:
         meta_clean = dict(meta or {})
         scope_clean = normalize_scope(scope, strict=source.startswith("manual"))
         raw_clean = content.strip()
-        is_lifecycle_op = any(k in meta_clean for k in ("archives", "graduates", "supersedes", "reinforces"))
+        is_lifecycle_op = any(k in meta_clean for k in ("archives", "graduates", "supersedes", "reinforces", "edits"))
 
         # Titans-style surprise & conflict gate against active same-scope/global memories
         surprise_info: dict[str, Any] = {
@@ -1206,6 +1316,9 @@ class BrainEngine:
             grad_id = persisted.meta.get("graduates")
             if grad_id and db.get_node(str(grad_id)) is None:
                 raise NotFoundError(f"Graduate target node not found: {grad_id}")
+            edit_id = persisted.meta.get("edits")
+            if edit_id and db.get_node(str(edit_id)) is None:
+                raise NotFoundError(f"Edit target node not found: {edit_id}")
             node, superseded = self._compile_atom_into_db(db, persisted, synthesize_eval=True)
             db.set_meta("atom_count", str(len(self.ledger.load_all_atoms())))
             snap_ver = db.get_meta("snapshot_version", self.snapshots.current_version() or "v0001")
@@ -1216,11 +1329,135 @@ class BrainEngine:
             "superseded": superseded.id if (superseded and sup_id) else None,
             "archived": superseded.id if (superseded and arc_id) else None,
             "graduated": superseded.id if (superseded and grad_id) else None,
+            "edited": edit_id,
             "reinforced": persisted.meta.get("reinforces"),
             "surprise": surprise_info,
             "redacted": bool(persisted.meta.get("redacted_types")),
             "snapshot_version": snap_ver,
         }
+
+    def edit_node(
+        self,
+        node_id: str,
+        *,
+        rule: str | None = None,
+        rationale: str | None = None,
+        scope: str | None = None,
+        severity: str | None = None,
+        kind: str | None = None,
+        guard_hint: str | None = None,
+        guard_pattern: str | None = None,
+        source_ref: str | None = None,
+        trigger_when: list[str] | None = None,
+        entities: list[str] | None = None,
+        device: str | None = None,
+    ) -> dict[str, Any]:
+        """Edit an existing card's structured fields in place via an immutable `manual:edit` ledger event."""
+        with self.snapshots.open_current(read_only=True) as db:
+            old = db.get_node(node_id)
+            if old is None:
+                raise NotFoundError(
+                    f"Node not found: {node_id}",
+                    hint="run `fos recall <query>` to find node IDs",
+                )
+            snap_ver = db.get_meta("snapshot_version", self.snapshots.current_version() or "v0001")
+
+        meta: dict[str, Any] = {"edits": node_id}
+        changed_fields: list[str] = []
+
+        new_type = old.type
+        if kind is not None:
+            k = kind.strip()
+            if k not in VALID_KINDS:
+                raise UsageError(f"Invalid kind '{kind}'. Must be one of: {', '.join(VALID_KINDS)}")
+            if k != old.type:
+                new_type = k
+                meta["type"] = k
+                changed_fields.append("type")
+
+        new_scope = old.scope
+        if scope is not None:
+            sc = normalize_scope(scope, strict=True)
+            if sc != old.scope:
+                new_scope = sc
+                meta["scope"] = sc
+                changed_fields.append("scope")
+
+        if severity is not None:
+            sev = severity.strip().upper()
+            if sev not in ("P0", "P1", "P2"):
+                raise UsageError(f"Invalid severity '{severity}'. Must be one of: P0, P1, P2")
+            if sev != old.severity:
+                meta["severity"] = sev
+                changed_fields.append("severity")
+
+        new_rule = old.rule
+        if rule is not None:
+            r = rule.strip()
+            if not r:
+                raise UsageError("Rule must be non-empty.")
+            if r != old.rule:
+                new_rule = r
+                meta["rule"] = r
+                changed_fields.append("rule")
+
+        if rationale is not None:
+            rat = rationale.strip()
+            if rat != old.rationale:
+                meta["rationale"] = rat
+                changed_fields.append("rationale")
+
+        if guard_hint is not None:
+            gh = guard_hint.strip()
+            if gh != old.guard_hint:
+                meta["guard_hint"] = gh
+                changed_fields.append("guard_hint")
+
+        if guard_pattern is not None:
+            gp = guard_pattern.strip()
+            if gp != old.guard_pattern:
+                meta["guard_pattern"] = gp
+                changed_fields.append("guard_pattern")
+
+        if source_ref is not None:
+            sr = source_ref.strip()
+            if sr != old.source_ref:
+                meta["source_ref"] = sr
+                changed_fields.append("source_ref")
+
+        if trigger_when is not None:
+            tw = _clean_string_list(trigger_when, redact=True)
+            if tw != old.trigger_when:
+                meta["trigger_when"] = tw
+                changed_fields.append("trigger_when")
+
+        if entities is not None:
+            ents = _clean_string_list(entities, redact=True)
+            if ents != old.entities:
+                meta["entities"] = ents
+                changed_fields.append("entities")
+
+        if not changed_fields:
+            return {
+                "atom": None,
+                "node": old.to_dict(),
+                "edited": node_id,
+                "changed_fields": [],
+                "redacted": False,
+                "snapshot_version": snap_ver,
+            }
+
+        meta["edit_fields"] = changed_fields
+        res = self.add_atom(
+            kind=new_type,
+            content=f"Edit {node_id} ({', '.join(changed_fields)}): {new_rule}",
+            scope=new_scope,
+            source="manual:edit",
+            device=device,
+            meta=meta,
+        )
+        res["changed_fields"] = changed_fields
+        return res
 
     def correct_node(
         self,

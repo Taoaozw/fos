@@ -148,6 +148,27 @@ export interface NodeDetailResponse {
   graph?: GraphEdge[]
 }
 
+export interface EditNodeInput {
+  rule?: string
+  rationale?: string
+  scope?: string
+  severity?: string
+  type?: string
+  guard_hint?: string
+  guard_pattern?: string
+  source_ref?: string
+  trigger_when?: string[]
+  entities?: string[]
+}
+
+export interface EditNodeResponse {
+  node: CompiledNode
+  edited: string
+  changed_fields: string[]
+  redacted?: boolean
+  snapshot_version: string
+}
+
 export interface BootResponse {
   mode: string
   snapshot_version: string
@@ -176,12 +197,6 @@ export interface RecallItem extends CompiledNode {
   score: number
   channels: string[]
   compat_check?: CompatCheck
-}
-
-export interface CardFilterPreset {
-  scope?: string
-  special?: "all" | "patterns" | "issues" | "guards"
-  nonce: number
 }
 
 export interface RecallResponse {

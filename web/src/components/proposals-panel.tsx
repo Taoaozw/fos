@@ -5,6 +5,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query"
+import { useQueryStates } from "nuqs"
 import {
   IconArchive,
   IconArrowUpRight,
@@ -34,6 +35,11 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import { fosApi } from "@/lib/api"
 import { useRevealGroup } from "@/lib/motion"
+import {
+  proposalsFilterParsers,
+  type ProposalKindFilter,
+  type ProposalStatusFilter,
+} from "@/lib/url-state"
 import type { Proposal } from "@/lib/types"
 
 interface ProposalsPanelProps {
@@ -219,12 +225,12 @@ function ProposalCard({
   return (
     <div
       data-slot="proposal-card"
-      className={`group rounded-xl border border-border border-l-[3px] bg-card transition-all ${
+      className={`surface-card interactive-card group border-l-[3px] ${
         km.stripeClass
       } ${
         selected
           ? "ring-1 ring-primary/40 border-primary/45 bg-accent/20"
-          : "hover:border-border/90 hover:shadow-xs"
+          : "hover:border-border"
       }`}
     >
       <div className="flex flex-col gap-3 p-4">
@@ -521,8 +527,8 @@ function ProposalCard({
 }
 
 export function ProposalsPanel({ onJumpToCard }: ProposalsPanelProps) {
-  const [statusFilter, setStatusFilter] = useState<string>("pending")
-  const [kindFilter, setKindFilter] = useState<string>("all")
+  const [{ pstatus: statusFilter, pkind: kindFilter }, setProposalFilters] =
+    useQueryStates(proposalsFilterParsers)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [batchProgress, setBatchProgress] = useState<{
     action: "accept" | "dismiss"
@@ -729,12 +735,16 @@ export function ProposalsPanel({ onJumpToCard }: ProposalsPanelProps) {
   return (
     <div className="flex flex-col gap-3.5">
       {/* Control & Filter Header */}
-      <div className="flex flex-col gap-3 rounded-xl border border-border bg-card px-4 py-3">
+      <div className="surface-card flex flex-col gap-3 px-4 py-3.5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-3">
             <Select
               value={statusFilter}
-              onValueChange={(v) => setStatusFilter(v ?? "pending")}
+              onValueChange={(v) =>
+                void setProposalFilters({
+                  pstatus: (v ?? "pending") as ProposalStatusFilter,
+                })
+              }
             >
               <SelectTrigger size="sm" className="w-36 text-xs">
                 <SelectValue>{statusSelectLabel}</SelectValue>
@@ -758,34 +768,34 @@ export function ProposalsPanel({ onJumpToCard }: ProposalsPanelProps) {
 
             {/* Kind Filter Pills */}
             <div className="flex flex-wrap items-center gap-1.5">
-              <button
+              <Button
                 type="button"
-                onClick={() => setKindFilter("all")}
-                className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
-                  kindFilter === "all"
-                    ? "bg-primary font-medium text-primary-foreground"
-                    : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground"
-                }`}
+                size="xs"
+                variant={kindFilter === "all" ? "default" : "secondary"}
+                onClick={() => void setProposalFilters({ pkind: "all" })}
+                className="h-7 rounded-full px-3 text-xs"
               >
                 全部 ({allProposals.length})
-              </button>
+              </Button>
               {Object.entries(KIND_META).map(([key, meta]) => {
                 const count = kindCounts[key] ?? 0
                 if (count === 0 && kindFilter !== key) return null
                 const active = kindFilter === key
                 return (
-                  <button
+                  <Button
                     key={key}
                     type="button"
-                    onClick={() => setKindFilter(active ? "all" : key)}
-                    className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
-                      active
-                        ? "bg-primary font-medium text-primary-foreground"
-                        : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground"
-                    }`}
+                    size="xs"
+                    variant={active ? "default" : "secondary"}
+                    onClick={() =>
+                      void setProposalFilters({
+                        pkind: (active ? "all" : key) as ProposalKindFilter,
+                      })
+                    }
+                    className="h-7 rounded-full px-3 text-xs"
                   >
                     {meta.label} ({count})
-                  </button>
+                  </Button>
                 )
               })}
             </div>

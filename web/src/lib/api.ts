@@ -2,6 +2,8 @@ import type {
   BootResponse,
   DashboardResponse,
   DreamResponse,
+  EditNodeInput,
+  EditNodeResponse,
   EvalResponse,
   HealthResponse,
   MirrorResponse,
@@ -94,6 +96,8 @@ export const fosApi = {
         ...(input.supersedes ? { supersedes: input.supersedes } : {}),
       },
     }),
+  editNode: (id: string, input: EditNodeInput) =>
+    request<EditNodeResponse>("PATCH", `/v1/nodes/${encodeURIComponent(id)}`, input),
   correctNode: (id: string, content: string, reason: string) =>
     request<{ superseded: string; node: { id: string } }>(
       "POST",

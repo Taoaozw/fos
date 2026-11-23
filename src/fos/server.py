@@ -75,6 +75,20 @@ class CorrectRequest(BaseModel):
     device: str | None = None
 
 
+class EditNodeRequest(BaseModel):
+    rule: str | None = None
+    rationale: str | None = None
+    scope: str | None = None
+    severity: str | None = None
+    type: str | None = None
+    guard_hint: str | None = None
+    guard_pattern: str | None = None
+    source_ref: str | None = None
+    trigger_when: list[str] | None = None
+    entities: list[str] | None = None
+    device: str | None = None
+
+
 class ArchiveRequest(BaseModel):
     reason: str = ""
     device: str | None = None
@@ -330,6 +344,26 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             return brain.get(node_id, tier=tier, include_graph=graph)
+        except FosError as exc:
+            raise _http_from_fos_error(exc) from exc
+
+    @app.patch("/v1/nodes/{node_id}", dependencies=[Depends(require_auth)])
+    def edit_node(node_id: str, req: EditNodeRequest) -> dict[str, Any]:
+        try:
+            return brain.edit_node(
+                node_id,
+                rule=req.rule,
+                rationale=req.rationale,
+                scope=req.scope,
+                severity=req.severity,
+                kind=req.type,
+                guard_hint=req.guard_hint,
+                guard_pattern=req.guard_pattern,
+                source_ref=req.source_ref,
+                trigger_when=req.trigger_when,
+                entities=req.entities,
+                device=req.device,
+            )
         except FosError as exc:
             raise _http_from_fos_error(exc) from exc
 

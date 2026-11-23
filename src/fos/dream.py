@@ -15,6 +15,7 @@ from typing import Any
 from fos.config import ProviderConfig
 from fos.engine import (
     BrainEngine,
+    apply_node_edit_patch,
     build_l0_line,
     extract_entities,
     extract_triggers,
@@ -530,6 +531,33 @@ def _compile_dream_nodes(
                         else f"[graduated: {reason}]"
                     )
                 target.updated_at = atom.ts
+            continue
+
+        # Replay explicit immutable in-place edit transition from ledger
+        edit_target_id = meta.get("edits")
+        if edit_target_id:
+            target = nodes_by_id.get(str(edit_target_id))
+            if target is not None:
+                scope_changed, _old_scope = apply_node_edit_patch(
+                    target, meta, ts=atom.ts, atom_id=atom.id
+                )
+                if scope_changed:
+                    for edge in edges:
+                        if (
+                            edge.src_id == target.id
+                            and edge.edge_type == "APPLIES_TO"
+                            and edge.valid_until is None
+                        ):
+                            edge.valid_until = atom.ts
+                    if target.scope and target.scope != "global":
+                        edges.append(
+                            GraphEdge(
+                                src_id=target.id,
+                                dst_id=f"scope:{target.scope}",
+                                edge_type="APPLIES_TO",
+                                valid_from=atom.ts,
+                            )
+                        )
             continue
 
         # Replay Titans low-surprise reinforcement transition from ledger

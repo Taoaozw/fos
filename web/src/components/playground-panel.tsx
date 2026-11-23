@@ -79,17 +79,19 @@ export function PlaygroundPanel({ dashboard, onJumpToCard }: PlaygroundPanelProp
   return (
     <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
       {/* Recall */}
-      <section className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-xs">
-        <div className="flex items-start justify-between gap-2">
+      <section className="surface-card flex flex-col gap-4 p-5">
+        <div className="flex items-center gap-3">
+          <span className="icon-tile size-9 text-chart-1">
+            <IconSearch className="size-4" />
+          </span>
           <div>
-            <h2 className="text-[15px] font-semibold text-foreground">
+            <h2 className="text-[15px] font-semibold tracking-tight text-foreground">
               四路混合检索实验室 (fos recall)
             </h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">
+            <p className="text-xs text-muted-foreground">
               FTS5 BM25 + sqlite-vec + 触发器/图谱扩散 + 双时态 --as-of 切片
             </p>
           </div>
-          <IconSearch className="mt-0.5 size-4 shrink-0 text-chart-1" />
         </div>
 
         <form onSubmit={handleRecall} className="flex flex-col gap-2.5">
@@ -186,7 +188,7 @@ export function PlaygroundPanel({ dashboard, onJumpToCard }: PlaygroundPanelProp
                     <div
                       key={r.id}
                       onClick={() => onJumpToCard(r.id)}
-                      className={`group cursor-pointer rounded-xl border border-border border-l-[3px] bg-background/60 p-3.5 transition-all hover:border-foreground/25 hover:bg-accent/25 ${stripe}`}
+                      className={`interactive-card group cursor-pointer rounded-xl border border-border/80 border-l-[3px] bg-card p-3.5 hover:border-foreground/20 ${stripe}`}
                     >
                       <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
                         <div className="flex flex-wrap items-center gap-1.5">
@@ -267,17 +269,19 @@ export function PlaygroundPanel({ dashboard, onJumpToCard }: PlaygroundPanelProp
       </section>
 
       {/* Mirror */}
-      <section className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-xs">
-        <div className="flex items-start justify-between gap-2">
+      <section className="surface-card flex flex-col gap-4 p-5">
+        <div className="flex items-center gap-3">
+          <span className="icon-tile size-9 text-chart-2">
+            <IconEyeCheck className="size-4" />
+          </span>
           <div>
-            <h2 className="text-[15px] font-semibold text-foreground">
+            <h2 className="text-[15px] font-semibold tracking-tight text-foreground">
               决策前照镜子 (fos mirror)
             </h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">
+            <p className="text-xs text-muted-foreground">
               并发比对红线冲突、历史错题、过往决策（含已否决方案）与未验证假设
             </p>
           </div>
-          <IconEyeCheck className="mt-0.5 size-4 shrink-0 text-chart-2" />
         </div>
 
         <form onSubmit={handleMirror} className="flex flex-col gap-2.5">

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useQueryStates } from "nuqs"
 import {
   IconAlertTriangle,
   IconBrain,
@@ -17,8 +18,9 @@ import { GraphPanel } from "@/components/graph-panel"
 import { OverviewPanel } from "@/components/overview-panel"
 import { PlaygroundPanel } from "@/components/playground-panel"
 import { ProposalsPanel } from "@/components/proposals-panel"
+import { ScopeCombobox } from "@/components/shared/scope-combobox"
+import { StatusPill } from "@/components/shared/status-pill"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -28,7 +30,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
 import { Kbd } from "@/components/ui/kbd"
 import {
   Select,
@@ -42,15 +43,20 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { ApiError, fosApi, getStoredToken, setStoredToken } from "@/lib/api"
-import { spinOnce, usePanelTransition } from "@/lib/motion"
-import type { CardFilterPreset } from "@/lib/types"
+import { spinOnce, usePanelTransition, useSlidingIndicator } from "@/lib/motion"
+import { SCOPE_ALL } from "@/lib/scope-tree"
+import {
+  appNavParsers,
+  cardsFilterParsers,
+  type AppTab,
+  type CardSpecialFilter,
+} from "@/lib/url-state"
 
 export function App() {
   const [token, setToken] = useState<string>(() => getStoredToken())
   const [authError, setAuthError] = useState<string>("")
-  const [activeTab, setActiveTab] = useState<string>("overview")
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
-  const [cardFilterPreset, setCardFilterPreset] = useState<CardFilterPreset | null>(null)
+  const [{ tab: activeTab, node: selectedNodeId }, setNav] = useQueryStates(appNavParsers)
+  const [, setCardFilters] = useQueryStates(cardsFilterParsers)
   const [isDark, setIsDark] = useState<boolean>(false)
   const [themeVersion, setThemeVersion] = useState<number>(0)
 
@@ -61,9 +67,10 @@ export function App() {
   const [addContent, setAddContent] = useState("")
   const refreshIconRef = useRef<HTMLSpanElement | null>(null)
   const tabPanelRef = useRef<HTMLDivElement | null>(null)
+  const tabsListRef = useRef<HTMLDivElement | null>(null)
 
   const queryClient = useQueryClient()
-  usePanelTransition(tabPanelRef, [activeTab], { y: 6, duration: 0.22 })
+  usePanelTransition(tabPanelRef, [activeTab], { y: 5, duration: 0.28 })
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", isDark)
@@ -84,6 +91,8 @@ export function App() {
     enabled: Boolean(healthQuery.data) && !needsAuth,
     retry: false,
   })
+
+  const tabIndicator = useSlidingIndicator(tabsListRef, dashboardQuery.data ? activeTab : "")
 
   useEffect(() => {
     if (dashboardQuery.error instanceof ApiError) {
@@ -107,7 +116,7 @@ export function App() {
       toast.success(`已写入账本：${res.node?.id ?? res.atom.id}`)
       setAddOpen(false)
       setAddContent("")
-      if (res.node?.id) setSelectedNodeId(res.node.id)
+      if (res.node?.id) void setNav({ node: res.node.id })
       void queryClient.invalidateQueries({ queryKey: ["fos"] })
     },
     onError: (err: Error) => toast.error(err.message),
@@ -120,67 +129,184 @@ export function App() {
   }
 
   const handleJumpToCard = (nodeId: string) => {
-    setSelectedNodeId(nodeId)
-    setActiveTab("cards")
+    void setNav({ tab: "cards", node: nodeId }, { history: "push" })
   }
 
-  const handleFilterCards = (opts: { scope?: string; special?: "all" | "patterns" | "issues" | "guards" }) => {
-    setCardFilterPreset({ ...opts, nonce: Date.now() })
-    setActiveTab("cards")
+  const handleFilterCards = (opts: { scope?: string; special?: CardSpecialFilter }) => {
+    void setCardFilters({
+      scope: opts.scope ?? SCOPE_ALL,
+      special: opts.special ?? "all",
+      status: "active",
+      severity: "__all__",
+      kind: "__all__",
+      q: "",
+    })
+    void setNav({ tab: "cards" }, { history: "push" })
   }
+
+  const pendingProposals = dashboardQuery.data?.counts.pending_proposals ?? 0
+  const snapVer = dashboardQuery.data?.snapshot_version ?? healthQuery.data?.snapshot_version ?? "-"
 
   return (
     <TooltipProvider delay={150}>
-    <div className="flex min-h-screen flex-col bg-background text-foreground">
+    <Tabs
+      value={activeTab}
+      onValueChange={(v) => void setNav({ tab: String(v) as AppTab }, { history: "push" })}
+      className="flex min-h-screen flex-col gap-0 bg-background text-foreground"
+    >
       <Toaster position="bottom-right" richColors />
 
-      <header className="sticky top-0 z-20 border-b border-border bg-background/95 backdrop-blur">
-        <div className="flex w-full flex-wrap items-center justify-between gap-3 px-4 py-2">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2">
-              <IconBrain className="size-4 text-chart-2" />
-              <span className="font-mono text-sm font-semibold tracking-tight">FlowOS</span>
-            </div>
-            <span className="text-border">/</span>
-            <Badge variant="outline" className="rounded-sm border-border/80 bg-card font-mono text-[11px] text-muted-foreground">
-              snap {dashboardQuery.data?.snapshot_version ?? healthQuery.data?.snapshot_version ?? "-"}
-            </Badge>
-            {dashboardQuery.data && (
-              <Badge variant="outline" className="rounded-sm border-border/80 bg-card font-mono text-[11px] text-muted-foreground">
-                <span className={`mr-1.5 inline-block size-1.5 rounded-full ${dashboardQuery.data.sqlite_vec ? "bg-chart-2" : "bg-muted-foreground"}`} />
-                vec:{dashboardQuery.data.sqlite_vec ? "on" : "off"} · {dashboardQuery.data.embedder ?? "local_hash"}
-              </Badge>
-            )}
+      <header className="sticky top-0 z-20 border-b border-border/75 bg-card/88 backdrop-blur-md">
+        <div className="flex h-13 w-full items-center gap-3 px-4 sm:px-5">
+          {/* Left: Compact Brand + Status Tooltip */}
+          <div className="flex shrink-0 items-center gap-2">
+            <span className="icon-tile size-7 text-chart-2">
+              <IconBrain className="size-4" />
+            </span>
+            <span className="hidden font-heading text-[15px] font-semibold tracking-tight text-foreground sm:inline">
+              FlowOS
+            </span>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <span className="inline-flex cursor-default">
+                    <StatusPill
+                      tone={dashboardQuery.data?.sqlite_vec ? "success" : "neutral"}
+                      dot
+                      pulse={Boolean(dashboardQuery.data?.sqlite_vec)}
+                      mono
+                      className="px-2 py-0 text-[11px]"
+                    >
+                      {snapVer}
+                    </StatusPill>
+                  </span>
+                }
+              />
+              <TooltipContent side="bottom">
+                snap {snapVer}
+                {dashboardQuery.data
+                  ? ` · vec:${dashboardQuery.data.sqlite_vec ? "on" : "off"} · ${dashboardQuery.data.embedder ?? "local_hash"}`
+                  : ""}
+              </TooltipContent>
+            </Tooltip>
           </div>
 
-          <div className="flex items-center gap-2">
+          {/* Center: Single-Row Gliding Navigation Tabs */}
+          {dashboardQuery.data ? (
+            <div
+              ref={tabsListRef}
+              className="relative flex h-full min-w-0 flex-1 items-center overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            >
+              <TabsList
+                variant="line"
+                className="h-full w-fit justify-start gap-0.5 p-0 text-[13px] [&_[data-slot=tabs-trigger]]:after:hidden"
+              >
+                <TabsTrigger
+                  value="overview"
+                  className="h-full flex-none rounded-none px-3 font-medium text-muted-foreground transition-colors duration-200 hover:text-foreground data-active:text-foreground"
+                >
+                  总览
+                </TabsTrigger>
+                <TabsTrigger
+                  value="proposals"
+                  className="h-full flex-none rounded-none px-3 font-medium text-muted-foreground transition-colors duration-200 hover:text-foreground data-active:text-foreground"
+                >
+                  推荐
+                  <span
+                    className={`ml-1 rounded-full px-1.5 py-0.5 font-mono text-[10px] leading-none font-medium ${
+                      pendingProposals > 0
+                        ? "bg-chart-3/16 text-chart-3"
+                        : "bg-muted text-muted-foreground"
+                    }`}
+                  >
+                    {pendingProposals}
+                  </span>
+                </TabsTrigger>
+                <TabsTrigger
+                  value="cards"
+                  className="h-full flex-none rounded-none px-3 font-medium text-muted-foreground transition-colors duration-200 hover:text-foreground data-active:text-foreground"
+                >
+                  知识卡片
+                  <span className="ml-1 rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px] leading-none text-muted-foreground">
+                    {dashboardQuery.data.counts.active_nodes}
+                  </span>
+                </TabsTrigger>
+                <TabsTrigger
+                  value="graph"
+                  className="h-full flex-none rounded-none px-3 font-medium text-muted-foreground transition-colors duration-200 hover:text-foreground data-active:text-foreground"
+                >
+                  双时态图谱
+                </TabsTrigger>
+                <TabsTrigger
+                  value="playground"
+                  className="h-full flex-none rounded-none px-3 font-medium text-muted-foreground transition-colors duration-200 hover:text-foreground data-active:text-foreground"
+                >
+                  检索 &amp; 照镜子
+                </TabsTrigger>
+                <TabsTrigger
+                  value="audit"
+                  className="h-full flex-none rounded-none px-3 font-medium text-muted-foreground transition-colors duration-200 hover:text-foreground data-active:text-foreground"
+                >
+                  账本 &amp; 门禁
+                  <span className="ml-1 rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px] leading-none text-muted-foreground">
+                    {dashboardQuery.data.counts.ledger_atoms}
+                  </span>
+                </TabsTrigger>
+              </TabsList>
+              {tabIndicator.ready && (
+                <span
+                  aria-hidden="true"
+                  style={{
+                    transform: `translate3d(${tabIndicator.left}px, 0, 0)`,
+                    width: `${tabIndicator.width}px`,
+                  }}
+                  className="pointer-events-none absolute bottom-0 left-0 h-[2px] rounded-full bg-foreground transition-[transform,width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
+                />
+              )}
+            </div>
+          ) : (
+            <div className="flex-1" />
+          )}
+
+          {/* Right: Compact Actions */}
+          <div className="flex shrink-0 items-center gap-1.5">
             {dashboardQuery.data && (
               <>
-                <Button size="sm" onClick={() => setAddOpen(true)}>
+                <Button size="sm" className="h-8 rounded-lg shadow-2xs" onClick={() => setAddOpen(true)}>
                   <IconPlus className="size-3.5" />
-                  新增记忆
+                  <span className="hidden md:inline">新增记忆</span>
+                  <span className="md:hidden">新增</span>
                 </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    spinOnce(refreshIconRef.current)
-                    void queryClient.invalidateQueries({ queryKey: ["fos"] })
-                  }}
-                >
-                  <span ref={refreshIconRef} className="inline-flex">
-                    <IconRefresh className="size-3.5" />
-                  </span>
-                  刷新
-                </Button>
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        className="rounded-lg text-muted-foreground hover:text-foreground"
+                        aria-label="刷新"
+                        onClick={() => {
+                          spinOnce(refreshIconRef.current)
+                          void queryClient.invalidateQueries({ queryKey: ["fos"] })
+                        }}
+                      />
+                    }
+                  >
+                    <span ref={refreshIconRef} className="inline-flex">
+                      <IconRefresh className="size-4" />
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">刷新数据</TooltipContent>
+                </Tooltip>
               </>
             )}
             <Tooltip>
               <TooltipTrigger
                 render={
                   <Button
-                    variant="outline"
+                    variant="ghost"
                     size="icon-sm"
+                    className="rounded-lg text-muted-foreground hover:text-foreground"
                     aria-label="切换明暗主题"
                     onClick={() => setIsDark((d) => !d)}
                   />
@@ -188,27 +314,35 @@ export function App() {
               >
                 {isDark ? <IconSun className="size-4" /> : <IconMoon className="size-4" />}
               </TooltipTrigger>
-              <TooltipContent>{isDark ? "切换浅色模式" : "切换暗黑模式"}</TooltipContent>
+              <TooltipContent side="bottom">{isDark ? "切换浅色模式" : "切换暗黑模式"}</TooltipContent>
             </Tooltip>
             {healthQuery.data?.auth_enabled && token && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setStoredToken("")
-                  setToken("")
-                  setAuthError("")
-                }}
-              >
-                <IconLogout className="size-3.5" />
-                切换 Token
-              </Button>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="rounded-lg text-muted-foreground hover:text-foreground"
+                      aria-label="切换 Token"
+                      onClick={() => {
+                        setStoredToken("")
+                        setToken("")
+                        setAuthError("")
+                      }}
+                    />
+                  }
+                >
+                  <IconLogout className="size-4" />
+                </TooltipTrigger>
+                <TooltipContent side="bottom">切换 Token</TooltipContent>
+              </Tooltip>
             )}
           </div>
         </div>
       </header>
 
-      <main className="w-full flex-1 px-4 py-3">
+      <main className="w-full flex-1 px-4 py-3.5 sm:px-5">
         {healthQuery.isError ? (
           <Alert variant="destructive">
             <IconAlertTriangle className="size-4" />
@@ -228,40 +362,19 @@ export function App() {
           />
         ) : dashboardQuery.isLoading || !dashboardQuery.data ? (
           <div className="flex flex-col gap-4">
-            <div className="flex gap-2 border-b border-border pb-2">
-              {Array.from({ length: 6 }).map((_, i) => (
-                <Skeleton key={i} className="h-7 w-28" />
-              ))}
-            </div>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
               {Array.from({ length: 6 }).map((_, i) => (
-                <Skeleton key={i} className="h-24 w-full rounded-lg" />
+                <Skeleton key={i} className="h-24 w-full rounded-2xl" />
               ))}
             </div>
-            <Skeleton className="h-20 w-full rounded-lg" />
+            <Skeleton className="h-20 w-full rounded-2xl" />
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              <Skeleton className="h-80 w-full rounded-lg" />
-              <Skeleton className="h-80 w-full rounded-lg" />
+              <Skeleton className="h-80 w-full rounded-2xl" />
+              <Skeleton className="h-80 w-full rounded-2xl" />
             </div>
           </div>
         ) : (
-          <Tabs value={activeTab} onValueChange={(v) => setActiveTab(String(v))}>
-            <TabsList variant="line" className="mb-3 w-full justify-start overflow-x-auto border-b border-border pb-1 text-sm">
-              <TabsTrigger value="overview" className="flex-none px-3">总览 Overview</TabsTrigger>
-              <TabsTrigger value="proposals" className="flex-none px-3">
-                推荐 Inbox <span className="ml-1 font-mono text-xs text-chart-3">({dashboardQuery.data.counts.pending_proposals ?? 0})</span>
-              </TabsTrigger>
-              <TabsTrigger value="cards" className="flex-none px-3">
-                知识卡片 Cards <span className="ml-1 font-mono text-xs text-muted-foreground">({dashboardQuery.data.counts.active_nodes})</span>
-              </TabsTrigger>
-              <TabsTrigger value="graph" className="flex-none px-3">双时态图谱 Graph</TabsTrigger>
-              <TabsTrigger value="playground" className="flex-none px-3">检索 &amp; 照镜子</TabsTrigger>
-              <TabsTrigger value="audit" className="flex-none px-3">
-                账本 &amp; 门禁 <span className="ml-1 font-mono text-xs text-muted-foreground">({dashboardQuery.data.counts.ledger_atoms})</span>
-              </TabsTrigger>
-            </TabsList>
-
-            <div ref={tabPanelRef}>
+          <div ref={tabPanelRef}>
             <TabsContent value="overview">
               <OverviewPanel
                 dashboard={dashboardQuery.data}
@@ -278,8 +391,7 @@ export function App() {
               <CardsPanel
                 dashboard={dashboardQuery.data}
                 selectedNodeId={selectedNodeId}
-                onSelectNode={setSelectedNodeId}
-                filterPreset={cardFilterPreset}
+                onSelectNode={(id) => void setNav({ node: id })}
               />
             </TabsContent>
 
@@ -301,8 +413,7 @@ export function App() {
             <TabsContent value="audit">
               <AuditPanel dashboard={dashboardQuery.data} />
             </TabsContent>
-            </div>
-          </Tabs>
+          </div>
         )}
       </main>
 
@@ -340,12 +451,13 @@ export function App() {
                   <SelectItem value="P2">P2</SelectItem>
                 </SelectContent>
               </Select>
-              <Input
-                value={addScope}
-                onChange={(e) => setAddScope(e.target.value)}
-                placeholder="scope (如 global / eng/frontend / eng/ops / fos)"
-                className="h-8 flex-1 font-mono text-xs"
-              />
+              <div className="min-w-44 flex-1">
+                <ScopeCombobox
+                  value={addScope}
+                  onChange={setAddScope}
+                  scopes={dashboardQuery.data?.scopes ?? []}
+                />
+              </div>
             </div>
             <Textarea
               rows={4}
@@ -364,7 +476,7 @@ export function App() {
           </form>
         </DialogContent>
       </Dialog>
-    </div>
+    </Tabs>
     </TooltipProvider>
   )
 }

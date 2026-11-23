@@ -450,6 +450,14 @@ class SnapshotDB:
         )
         self.conn.commit()
 
+    def expire_scope_edges(self, node_id: str, valid_until: str) -> None:
+        """Close active APPLIES_TO scope edges for a node when its scope is edited."""
+        self.conn.execute(
+            "UPDATE edges SET valid_until = ? WHERE src_id = ? AND edge_type = 'APPLIES_TO' AND valid_until IS NULL",
+            (valid_until, node_id),
+        )
+        self.conn.commit()
+
     def get_edges(self, node_id: str, *, as_of: str | None = None, include_inactive: bool = False) -> list[GraphEdge]:
         rows = self.conn.execute(
             "SELECT * FROM edges WHERE src_id = ? OR dst_id = ? ORDER BY valid_from ASC",

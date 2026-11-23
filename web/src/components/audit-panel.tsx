@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from "react"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { debounce, useQueryState } from "nuqs"
 import {
   IconChevronDown,
   IconChevronUp,
@@ -8,6 +9,7 @@ import {
   IconShieldCheck,
 } from "@tabler/icons-react"
 import { toast } from "sonner"
+import { StatusPill } from "@/components/shared/status-pill"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -23,6 +25,7 @@ import {
 } from "@/components/ui/table"
 import { fosApi } from "@/lib/api"
 import { useRevealGroup } from "@/lib/motion"
+import { auditSearchParser } from "@/lib/url-state"
 import type { DashboardResponse, EvalResponse } from "@/lib/types"
 
 interface AuditPanelProps {
@@ -31,7 +34,7 @@ interface AuditPanelProps {
 
 export function AuditPanel({ dashboard }: AuditPanelProps) {
   const [evalReport, setEvalReport] = useState<EvalResponse | null>(null)
-  const [ledgerSearch, setLedgerSearch] = useState("")
+  const [ledgerSearch, setLedgerSearch] = useQueryState("aq", auditSearchParser)
   const [expandedAtomIds, setExpandedAtomIds] = useState<Set<string>>(() => new Set())
   const queryClient = useQueryClient()
   const gatesRef = useRef<HTMLDivElement | null>(null)
@@ -92,20 +95,26 @@ export function AuditPanel({ dashboard }: AuditPanelProps) {
   return (
     <div className="flex flex-col gap-4">
       {/* Regression Gate & Dream Compiler */}
-      <section className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-xs">
+      <section className="surface-card flex flex-col gap-4 p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-[15px] font-semibold text-foreground">
-              四维回归门禁与睡眠编译
-            </h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">
-              Recall / Temporal / Fidelity / Behavior 自动守门，未通过则拦截上线并保留原快照
-            </p>
+          <div className="flex items-center gap-3">
+            <span className="icon-tile size-9 text-chart-2">
+              <IconShieldCheck className="size-4" />
+            </span>
+            <div>
+              <h2 className="text-[15px] font-semibold tracking-tight text-foreground">
+                四维回归门禁与睡眠编译
+              </h2>
+              <p className="text-xs text-muted-foreground">
+                Recall / Temporal / Fidelity / Behavior 自动守门，未通过则拦截上线并保留原快照
+              </p>
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
               size="sm"
+              className="rounded-lg"
               disabled={evalMutation.isPending}
               onClick={() => evalMutation.mutate()}
             >
@@ -114,6 +123,7 @@ export function AuditPanel({ dashboard }: AuditPanelProps) {
             </Button>
             <Button
               size="sm"
+              className="rounded-lg shadow-2xs"
               disabled={dreamMutation.isPending}
               onClick={() => dreamMutation.mutate()}
             >
@@ -125,7 +135,7 @@ export function AuditPanel({ dashboard }: AuditPanelProps) {
 
         <div>
           {!evalReport ? (
-            <Alert className="rounded-lg bg-muted/25">
+            <Alert className="surface-inset border-border/65">
               <IconShieldCheck className="size-4 text-muted-foreground" />
               <AlertDescription className="text-xs text-muted-foreground">
                 点击「运行四维门禁」实时验证当前快照 <Kbd>{dashboard.snapshot_version}</Kbd> 的四维回归指标。
@@ -134,18 +144,15 @@ export function AuditPanel({ dashboard }: AuditPanelProps) {
           ) : (
             <div className="flex flex-col gap-3">
               <div className="flex flex-wrap items-center gap-2">
-                <Badge
-                  variant={evalReport.passed ? "default" : "destructive"}
-                  className="rounded-md font-mono text-xs"
-                >
+                <StatusPill tone={evalReport.passed ? "success" : "danger"} mono>
                   {evalReport.passed ? "ALL GATES PASSED" : "GATE FAILED"}
-                </Badge>
-                <Badge variant="outline" className="rounded-md font-mono text-xs">
+                </StatusPill>
+                <StatusPill tone="neutral" dot={false} mono>
                   snap: {evalReport.snapshot_version}
-                </Badge>
-                <Badge variant="outline" className="rounded-md font-mono text-xs">
+                </StatusPill>
+                <StatusPill tone="neutral" dot={false} mono>
                   golden: {evalReport.golden_cases}
-                </Badge>
+                </StatusPill>
               </div>
               <div
                 ref={gatesRef}
@@ -155,22 +162,19 @@ export function AuditPanel({ dashboard }: AuditPanelProps) {
                   <div
                     key={name}
                     data-anim="gate"
-                    className={`flex flex-col gap-2 rounded-xl border border-border border-l-[3px] bg-background/60 px-3.5 py-3 ${
-                      metrics.passed ? "border-l-chart-2" : "border-l-destructive"
-                    }`}
+                    className="surface-inset flex flex-col gap-2 px-4 py-3.5"
                   >
                     <div className="flex items-center justify-between">
                       <div className="font-mono text-xs font-semibold uppercase text-foreground">
                         {name}
                       </div>
-                      <Badge
-                        variant={metrics.passed ? "outline" : "destructive"}
-                        className={`h-5 rounded-sm font-mono text-[11px] ${
-                          metrics.passed ? "border-chart-2/40 text-chart-2" : ""
-                        }`}
+                      <StatusPill
+                        tone={metrics.passed ? "success" : "danger"}
+                        mono
+                        className="py-0 text-[10px]"
                       >
                         {metrics.passed ? "PASS" : "FAIL"}
-                      </Badge>
+                      </StatusPill>
                     </div>
                     <div className="font-mono text-xs leading-relaxed text-muted-foreground">
                       {name === "recall" &&
@@ -191,10 +195,10 @@ export function AuditPanel({ dashboard }: AuditPanelProps) {
       </section>
 
       {/* Immutable Ledger Timeline */}
-      <section className="flex flex-col overflow-hidden rounded-xl border border-border bg-card shadow-xs">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3.5">
+      <section className="surface-card flex flex-col overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/75 px-5 py-4">
           <div>
-            <h2 className="text-[15px] font-semibold text-foreground">
+            <h2 className="text-[15px] font-semibold tracking-tight text-foreground">
               不可变原始账本时间线
             </h2>
             <p className="mt-0.5 font-mono text-[11px] text-muted-foreground">
@@ -205,9 +209,14 @@ export function AuditPanel({ dashboard }: AuditPanelProps) {
             <IconSearch className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input
               value={ledgerSearch}
-              onChange={(e) => setLedgerSearch(e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value
+                void setLedgerSearch(next, {
+                  limitUrlUpdates: next === "" ? undefined : debounce(250),
+                })
+              }}
               placeholder="筛选账本 ID / scope / 原文..."
-              className="h-8 pl-8 text-xs"
+              className="h-8 rounded-lg pl-8 text-xs"
             />
           </div>
         </div>
