@@ -95,13 +95,15 @@ class FosClient:
         *,
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
+        timeout_s: float | None = None,
     ) -> dict[str, Any]:
         import httpx
 
         url = f"{self.cfg.brain_url.rstrip('/')}{path}"
         clean_params = {k: v for k, v in (params or {}).items() if v is not None}
+        eff_timeout = self.timeout_s if timeout_s is None else timeout_s
         try:
-            with httpx.Client(timeout=self.timeout_s, transport=self.http_transport) as client:
+            with httpx.Client(timeout=eff_timeout, transport=self.http_transport) as client:
                 resp = client.request(method, url, headers=self._headers(), params=clean_params, json=json_body)
         except httpx.HTTPError as exc:
             raise OfflineError(f"Brain unreachable at {self.cfg.brain_url}: {exc}") from exc
@@ -229,21 +231,33 @@ class FosClient:
 
         pending = self._read_outbox()
         flushed = 0
-        remaining: list[dict[str, Any]] = []
+        remaining: list[dict[str, Any]] = list(pending)
         if pending:
-            resp = self._request("POST", "/v1/sync/outbox", json_body={"atoms": pending})
-            accepted_ids = set(resp.get("accepted") or [])
-            flushed = len(accepted_ids)
-            remaining = [item for item in pending if item.get("id") not in accepted_ids]
-            if remaining:
-                self.outbox_path.write_text(
-                    "".join(json.dumps(x, ensure_ascii=False, separators=(",", ":")) + "\n" for x in remaining),
-                    encoding="utf-8",
+            chunk_size = 5
+            write_timeout = max(self.timeout_s, 60.0)
+            next_remaining: list[dict[str, Any]] = []
+            for idx in range(0, len(pending), chunk_size):
+                chunk = pending[idx : idx + chunk_size]
+                resp = self._request(
+                    "POST",
+                    "/v1/sync/outbox",
+                    json_body={"atoms": chunk},
+                    timeout_s=write_timeout,
                 )
-            elif self.outbox_path.exists():
-                self.outbox_path.unlink()
+                accepted_ids = set(resp.get("accepted") or [])
+                flushed += len(accepted_ids)
+                next_remaining.extend(item for item in chunk if item.get("id") not in accepted_ids)
+                tail = next_remaining + pending[idx + chunk_size :]
+                if tail:
+                    self.outbox_path.write_text(
+                        "".join(json.dumps(x, ensure_ascii=False, separators=(",", ":")) + "\n" for x in tail),
+                        encoding="utf-8",
+                    )
+                elif self.outbox_path.exists():
+                    self.outbox_path.unlink()
+            remaining = next_remaining
 
-        bundle = self._request("GET", "/v1/sync/snapshot")
+        bundle = self._request("GET", "/v1/sync/snapshot", timeout_s=max(self.timeout_s, 15.0))
         snap_ver = self._save_offline_snapshot(bundle)
         return {
             "mode": "online",
@@ -554,7 +568,12 @@ class FosClient:
             "meta": meta,
         }
         try:
-            return self._request("POST", "/v1/atoms", json_body=payload)
+            return self._request(
+                "POST",
+                "/v1/atoms",
+                json_body=payload,
+                timeout_s=max(self.timeout_s, 20.0),
+            )
         except OfflineError:
             queued = self._queue_outbox(payload)
             return {

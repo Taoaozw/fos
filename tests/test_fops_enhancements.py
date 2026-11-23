@@ -186,10 +186,12 @@ def test_auto_update_version_rules_download_sha_and_install_sh(tmp_path: Path) -
     assert st.updated_to == "0.2.0"
     assert st.failed_version == ""
 
+    from fos import __version__
+
     # 4. Status diagnostic report works online and offline
     st_on = client.status(offline=False)
     assert st_on["brain"]["reachable"] is True
-    assert st_on["last_update"] == "0.1.0 -> 0.2.0"
+    assert st_on["last_update"] == f"{__version__} -> 0.2.0"
     st_off = client.status(offline=True)
     assert st_off["brain"]["skipped"] == "offline"
 
