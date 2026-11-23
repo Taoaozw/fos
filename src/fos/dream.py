@@ -33,6 +33,7 @@ from fos.models import (
     parse_timestamp,
 )
 from fos.providers import Reasoner, build_providers
+from fos.scopes import infer_lub_scope, normalize_scope, scope_kind
 from fos.state_db import StateDB
 from fos.store import SnapshotDB
 from fos.tokens import estimate_tokens, extract_terms, truncate_to_tokens
@@ -82,12 +83,15 @@ When keep = true (STRICT L1 TOKEN BUDGET — anti-context-rot):
 - `rule`: MAX 1-2 crisp sentences (**<= 65 tokens / ~80 Chinese chars**). Actionable, timeless, no ticket IDs, no raw dumps. Preserve ALL exact technical flags and durable technical constants; if the raw input contains ANY prohibition/negation (`禁止`/`不要`/`不得`/`避免`/`never`/`avoid`/`must not`/`do not`), `rule` MUST explicitly include a Chinese negation word (`禁止`/`不要`/`避免`/`不得`) so negative guardrails are never silently lost!
 - `rationale`: MAX 1 short sentence (**<= 35 tokens**): first-principles structural WHY.
 - `guard_hint`: MAX 1 short sentence (**<= 30 tokens**): mechanical lint/unit-test/CI check if enforceable, otherwise "".
-- `scope`: ALWAYS keep the input repo `scope` for any lesson/decision mentioning repo/domain/product-specific concepts (e.g. 渠道/供应商/适配器/金标用例/evidence_ids/source_ref/长期记忆/蒸馏/具体接口). Use `"global"` ONLY for universal personal principles (`kind="principle"`) or OS/shell/git/engineering laws that apply identically to ANY repo with zero domain assumptions.
-- `severity`: P0 ONLY for universal cross-repo redlines or explicit global user principles that apply to EVERY project (NEVER for product/architecture design requirements of the current repo being built, such as memory-system `source_ref` or distillation rules — those are repo-scoped `decision`/`lesson` with `P1`); P1 for generalizable engineering lessons/decisions; P2 for narrow repo-only constraints.
+- `scope`: Pick the **Least Upper Bound (LUB)** scope (<= 3 levels; never over-promote to `global`):
+  - Keep the input `<repo>` scope for any lesson/decision mentioning repo/product-specific concepts (e.g. 渠道/供应商/适配器/金标用例/evidence_ids/source_ref/长期记忆/蒸馏/具体接口).
+  - Use hierarchical domain/specialty/stack scopes (`<= 3` slash segments) when a rule is reusable across a domain or stack without applying to every industry: e.g. `eng` (universal software engineering), `eng/frontend`, `eng/frontend/react`, `eng/frontend/shadcn`, `eng/backend`, `eng/backend/python`, `eng/backend/go`, `eng/backend/postgres`, `eng/backend/sqlite`, `eng/ops`, `eng/ai`, `product`, `writing`. Put cross-cutting concerns (`security`, `perf`, `migration`) in `entities`, NOT deeper scope segments.
+  - Use `"global"` ONLY for thin cross-industry personal meta-principles (`kind="principle"`, e.g. minimal local change, verify before claiming) that apply across ALL domains with zero stack assumptions.
+- `severity`: P0 ONLY for unconditional redlines (`global` or mounted domain-level redlines like `eng`/`eng/frontend` that must always hold inside that domain — NEVER for repo-specific product/architecture requirements, which are `decision`/`lesson` with `P1`); P1 for generalizable engineering lessons/decisions (0t L0 in global/domain scopes, on-demand L1 recall); P2 for narrow repo-only constraints.
 - `trigger_when`: 2-3 crisp situations when future AI should recall this before acting.
 
 Return STRICT JSON:
-{"items": [{"id": "<atom_id>", "keep": true/false, "kind": "principle|lesson|decision", "scope": "global|<repo>", "severity": "P0|P1|P2", "rule": "...", "rationale": "...", "guard_hint": "...", "trigger_when": ["..."], "entities": ["..."], "drop_reason": "..."}]}"""
+{"items": [{"id": "<atom_id>", "keep": true/false, "kind": "principle|lesson|decision", "scope": "global|<domain>[/<specialty>[/<stack>]]|<repo>", "severity": "P0|P1|P2", "rule": "...", "rationale": "...", "guard_hint": "...", "trigger_when": ["..."], "entities": ["..."], "drop_reason": "..."}]}"""
 
 
 def _is_low_signal_noise(atom: LedgerAtom) -> bool:
@@ -456,6 +460,7 @@ def _compile_dream_nodes(
 
     counters: dict[str, int] = {}
     nodes_by_id: dict[str, CompiledNode] = {}
+    distilled_scope_hints: dict[str, str] = {}
     node_order: list[str] = []
     edges: list[GraphEdge] = []
     merged_count = 0
@@ -517,8 +522,9 @@ def _compile_dream_nodes(
             continue
 
         atom_kind = atom.kind
-        origin_scope = (atom.scope or "global").strip().lower()
+        origin_scope = normalize_scope(atom.scope, strict=False)
         atom_scope = origin_scope
+        suggested_scope_hint: str | None = None
         guard_hint = str(meta.get("guard_hint") or "")
 
         # Apply LLM sleep distillation verdict if available for automated hindsight atoms
@@ -529,29 +535,30 @@ def _compile_dream_nodes(
                 continue
             if dist.get("kind") in VALID_KINDS:
                 atom_kind = dist["kind"]
-            suggested_scope = str(dist.get("scope") or origin_scope).strip().lower()
+            suggested_scope = normalize_scope(str(dist.get("scope") or origin_scope), strict=False)
+            suggested_scope_hint = suggested_scope
             is_global_authority = (
                 atom.source.startswith("manual")
                 or atom.source.startswith("hindsight:docs:global")
                 or (origin_scope == "global" and atom.kind == "principle")
             )
-            # Guard invariant: single-repo sources (git, repo docs, repo-scoped chats) NEVER self-promote
-            # to global P0 principles on first sight. Only global authority sources or cross-repo recurrence earn global scope.
+            # Guard invariant: single-repo automated sources (git, repo docs, repo-scoped chats) NEVER self-promote
+            # to global/domain P0 principles on first sight. Only global authority sources or cross-repo recurrence earn elevation.
             demoted_from_principle = False
-            if origin_scope != "global" and not atom.source.startswith("manual"):
+            if scope_kind(origin_scope) == "repo" and not atom.source.startswith("manual"):
                 atom_scope = origin_scope
                 if atom_kind == "principle":
                     atom_kind = "decision" if atom.source.startswith("hindsight:docs:") else "lesson"
                     demoted_from_principle = True
             elif atom_kind == "principle":
                 if is_global_authority:
-                    atom_scope = "global"
+                    atom_scope = suggested_scope if scope_kind(suggested_scope) in ("global", "domain") else "global"
                 else:
                     atom_scope = suggested_scope
-                    if atom_scope != "global":
+                    if scope_kind(atom_scope) == "repo":
                         atom_kind = "lesson"
                         demoted_from_principle = True
-            elif origin_scope != "global" and suggested_scope == "global":
+            elif scope_kind(origin_scope) == "repo" and scope_kind(suggested_scope) in ("global", "domain"):
                 # Keep repo-bound lessons in their origin repo unless proven across multiple repos
                 atom_scope = origin_scope
             else:
@@ -599,8 +606,30 @@ def _compile_dream_nodes(
         if merged_target is not None:
             merged_count += 1
             merged_target.seen_count += 1
-            if merged_target.scope != atom_scope and merged_target.scope != "global" and atom_scope != "global":
-                merged_target.scope = "global"
+            if (
+                merged_target.scope != atom_scope
+                and scope_kind(merged_target.scope) == "repo"
+                and scope_kind(atom_scope) == "repo"
+            ):
+                # Cross-repo recurrence: elevate to Least Upper Bound (domain/stack scope from LLM hint,
+                # explicit global hint, or deterministic LUB inference).
+                prev_hint = distilled_scope_hints.get(merged_target.id)
+                domain_hint = next(
+                    (h for h in (suggested_scope_hint, prev_hint) if h and scope_kind(h) == "domain"),
+                    None,
+                )
+                if domain_hint:
+                    merged_target.scope = domain_hint
+                elif suggested_scope_hint == "global" or prev_hint == "global":
+                    merged_target.scope = "global"
+                else:
+                    merged_target.scope = infer_lub_scope(
+                        [
+                            merged_target,
+                            {"rule": rule, "rationale": rationale, "entities": entities, "guard_hint": guard_hint},
+                        ],
+                        fallback="eng",
+                    )
             if atom_date and atom_date not in merged_target.seen_dates:
                 merged_target.seen_dates.append(atom_date)
                 merged_target.seen_dates.sort()
@@ -687,6 +716,8 @@ def _compile_dream_nodes(
         )
         node.l0 = build_l0_line(node)
         nodes_by_id[node_id] = node
+        if suggested_scope_hint:
+            distilled_scope_hints[node_id] = suggested_scope_hint
         node_order.append(node_id)
 
         sup_targets: list[str] = []

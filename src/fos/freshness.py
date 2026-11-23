@@ -127,9 +127,12 @@ def resolve_legacy_source_ref(scope: str, source: str, meta: dict[str, Any]) -> 
         if "claude" in source:
             search_dirs.extend([home / ".claude", home / ".claude" / "rules"])
     else:
-        git_root = Path(os.environ.get("FOS_GIT_ROOT") or (home / "project" / "clive"))
-        repo = git_root / scope
-        search_dirs.extend([repo, repo / "docs", repo / "docs" / "agents"])
+        from fos.scopes import canonical_repo_name, scope_kind
+
+        if scope_kind(scope) == "repo":
+            git_root = Path(os.environ.get("FOS_GIT_ROOT") or (home / "project" / "clive"))
+            repo = git_root / canonical_repo_name(scope)
+            search_dirs.extend([repo, repo / "docs", repo / "docs" / "agents"])
 
     target_lower = doc_file.lower()
     for d in search_dirs:

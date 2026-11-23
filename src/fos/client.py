@@ -253,14 +253,27 @@ class FosClient:
             "cached_nodes": len(bundle.get("nodes") or []),
         }
 
-    def boot(self, *, project: str | None = None, budget: int = 300) -> dict[str, Any]:
+    def boot(
+        self,
+        *,
+        project: str | None = None,
+        scopes: list[str] | None = None,
+        budget: int = 300,
+    ) -> dict[str, Any]:
+        from fos.scopes import format_scopes_param
+
+        scopes_param = format_scopes_param(scopes)
         if not self.is_remote:
-            return self._engine().boot(project=project, budget=budget)
+            return self._engine().boot(project=project, scopes=scopes, budget=budget)
         try:
-            return self._request("GET", "/v1/boot", params={"project": project, "budget": budget})
+            return self._request(
+                "GET",
+                "/v1/boot",
+                params={"project": project, "scopes": scopes_param, "budget": budget},
+            )
         except OfflineError:
             with self._open_offline_cache() as db:
-                return query_snapshot_boot(db, project=project, budget=budget, mode="offline_cache")
+                return query_snapshot_boot(db, project=project, scopes=scopes, budget=budget, mode="offline_cache")
 
     def _try_local_daemon(
         self,
@@ -318,6 +331,7 @@ class FosClient:
         *,
         kind: str | None = None,
         scope: str | None = None,
+        scopes: list[str] | None = None,
         as_of: str | None = None,
         budget: int = 1200,
         limit: int = 20,
@@ -325,8 +339,10 @@ class FosClient:
         exclude_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         from fos.code_pattern import format_stack_param
+        from fos.scopes import format_scopes_param
 
         stack_param = format_stack_param(cwd_stack)
+        scopes_param = format_scopes_param(scopes)
         excl_param = ",".join(x.strip() for x in (exclude_ids or []) if x.strip()) or None
         if not self.is_remote:
             warm = self._try_local_daemon(
@@ -336,6 +352,7 @@ class FosClient:
                     "q": query,
                     "kind": kind,
                     "scope": scope,
+                    "scopes": scopes_param,
                     "as_of": as_of,
                     "budget": budget,
                     "limit": limit,
@@ -349,6 +366,7 @@ class FosClient:
                 query,
                 kind=kind,
                 scope=scope,
+                scopes=scopes,
                 as_of=as_of,
                 budget=budget,
                 limit=limit,
@@ -363,6 +381,7 @@ class FosClient:
                     "q": query,
                     "kind": kind,
                     "scope": scope,
+                    "scopes": scopes_param,
                     "as_of": as_of,
                     "budget": budget,
                     "limit": limit,
@@ -379,6 +398,7 @@ class FosClient:
                     reranker=LexicalReranker(),
                     kind=kind,
                     scope=scope,
+                    scopes=scopes,
                     as_of=as_of,
                     budget=budget,
                     limit=limit,
@@ -413,18 +433,28 @@ class FosClient:
                     out["graph"] = [e.to_dict() for e in db.get_edges(node.id, include_inactive=True)]
                 return out
 
-    def mirror(self, proposal: str, *, scope: str | None = None) -> dict[str, Any]:
+    def mirror(
+        self,
+        proposal: str,
+        *,
+        scope: str | None = None,
+        scopes: list[str] | None = None,
+    ) -> dict[str, Any]:
         if not self.is_remote:
             warm = self._try_local_daemon(
                 "POST",
                 "/v1/mirror",
-                json_body={"proposal": proposal, "scope": scope},
+                json_body={"proposal": proposal, "scope": scope, "scopes": scopes},
             )
             if warm is not None:
                 return warm
-            return self._engine().mirror(proposal, scope=scope)
+            return self._engine().mirror(proposal, scope=scope, scopes=scopes)
         try:
-            return self._request("POST", "/v1/mirror", json_body={"proposal": proposal, "scope": scope})
+            return self._request(
+                "POST",
+                "/v1/mirror",
+                json_body={"proposal": proposal, "scope": scope, "scopes": scopes},
+            )
         except OfflineError:
             with self._open_offline_cache() as db:
                 return query_snapshot_mirror(
@@ -434,6 +464,7 @@ class FosClient:
                     reranker=LexicalReranker(),
                     reasoner=None,
                     scope=scope,
+                    scopes=scopes,
                     mode="offline_cache",
                 )
 
@@ -865,6 +896,7 @@ class FosClient:
         rationale: str | None = None,
         guard_hint: str | None = None,
         severity: str | None = None,
+        scope: str | None = None,
         force: bool = False,
     ) -> dict[str, Any]:
         if not self.is_remote:
@@ -877,6 +909,7 @@ class FosClient:
                 rationale=rationale,
                 guard_hint=guard_hint,
                 severity=severity,
+                scope=scope,
                 force=force,
                 device=self.cfg.device,
             )
@@ -888,6 +921,7 @@ class FosClient:
                 "rationale": rationale,
                 "guard_hint": guard_hint,
                 "severity": severity,
+                "scope": scope,
                 "force": force,
                 "device": self.cfg.device,
             },
@@ -910,15 +944,16 @@ class FosClient:
         diff_text: str | None = None,
         command: str | None = None,
         scope: str | None = None,
+        scopes: list[str] | None = None,
     ) -> dict[str, Any]:
         if not self.is_remote:
             from fos.guard import check_guard
 
-            return check_guard(self._engine(), diff_text=diff_text, command=command, scope=scope)
+            return check_guard(self._engine(), diff_text=diff_text, command=command, scope=scope, scopes=scopes)
         return self._request(
             "POST",
             "/v1/guard/check",
-            json_body={"diff_text": diff_text, "command": command, "scope": scope},
+            json_body={"diff_text": diff_text, "command": command, "scope": scope, "scopes": scopes},
         )
 
     def graduate(

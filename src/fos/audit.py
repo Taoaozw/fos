@@ -43,7 +43,7 @@ MANDATORY VERIFICATION PROTOCOL:
   2. `drifted`: The underlying implementation/symbol/config/boundary has changed, OR the rule is verbose/contradictory with another card and should be distilled into a sharper constraint. You MUST provide a crisp `suggested_rule` (1-2 Simplified Chinese sentences, <= 75 tokens, preserving exact technical symbols/flags), and optionally `suggested_type` (`decision`|`lesson`) / `suggested_severity` (`P1`|`P2`).
   3. `reclassify`: The rule's substance is valid, BUT its severity (`P1` vs `P2`), type (`decision` vs `lesson`), or wording should be tuned (e.g., narrow low-frequency detail occupying `P1` L0 budget should be downgraded to `P2`, or high-impact pitfall promoted to `P1`). Provide `suggested_severity` and/or `suggested_type` (and optional tightened `suggested_rule`). Never suggest `P0` for repo-scoped cards.
   4. `obsolete`: The referenced feature/module/workaround was deleted or replaced, OR the card is strictly duplicated/contradicted by a better card in the list, OR already mechanically enforced by ESLint / CI / Guard Test, OR low-value aesthetic/boilerplate/etiquette fluff failing the 6-month half-life test.
-  5. `misscoped`: The card clearly belongs to a DIFFERENT repository (not this repo). Provide `suggested_scope` (lowercase repo name) if clearly identifiable so it can be migrated, else "" to retire it.
+  5. `misscoped`: The card clearly belongs to a DIFFERENT repository or a reusable domain/stack scope (e.g. `eng/frontend`, `eng/backend/python`, `eng/ops`). Provide `suggested_scope` (lowercase repo name or <=3-level domain path) if clearly identifiable so it can be migrated, else "" to retire it.
 
 STRICT OUTPUT FORMAT (return STRICT JSON ONLY, no markdown fences, no prose):
 {
@@ -71,12 +71,14 @@ def resolve_repo_path(scope: str, explicit_repo: Path | None = None) -> Path:
             raise UsageError(f"Repository path does not exist: {p}")
         return p
 
-    target = scope.strip().lower()
-    if not target or target == "global":
+    from fos.scopes import canonical_repo_name, scope_kind
+
+    if not scope or scope_kind(scope) != "repo":
         raise UsageError(
-            "Codebase audit requires a concrete repository scope (e.g. `--scope fos`), not `global`.",
+            f"Codebase audit requires a concrete repository scope (e.g. `--scope fos`), not `{scope or 'global'}`.",
             hint="Run inside a git repository or pass `--scope <repo> --repo <path>`.",
         )
+    target = canonical_repo_name(scope)
 
     # 1. Check current working directory git root
     cwd = Path.cwd().resolve()
@@ -268,8 +270,10 @@ def _enqueue_audit_proposals(
             title = f"重分类/调优 {nid}（{' / '.join(changes)}）"
             topic_key = f"audit-reclassify-{nid.lower()}-{target_sev.lower()}-{target_type}"
         elif verdict == "misscoped" and f.get("suggested_scope") and f["suggested_scope"] not in ("global", scope):
+            from fos.scopes import normalize_scope
+
             kind = "fix_drifted"
-            target_scope = str(f["suggested_scope"]).strip().lower()
+            target_scope = normalize_scope(str(f["suggested_scope"]), strict=False)
             proposed_rule = str(f.get("suggested_rule") or node.rule).strip()
             title = f"迁移作用域 {nid}（{scope}→{target_scope}）"
             topic_key = f"audit-migrate-{nid.lower()}-{target_scope}"

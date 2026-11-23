@@ -36,6 +36,14 @@ from fos.models import (
     parse_timestamp,
 )
 from fos.providers import ProviderBundle, build_providers
+from fos.scopes import (
+    canonical_repo_name,
+    is_repo_root_ambient_doc,
+    normalize_scope,
+    resolve_active_scopes,
+    scope_depth,
+    scope_kind,
+)
 from fos.store import SnapshotDB, SnapshotManager
 from fos.tokens import (
     estimate_json_tokens,
@@ -238,31 +246,53 @@ def query_snapshot_boot(
     db: SnapshotDB,
     *,
     project: str | None = None,
+    scopes: list[str] | None = None,
     budget: int = 300,
     mode: str = "online",
 ) -> dict[str, Any]:
-    """Build <= budget token L0 wakeup kernel with project-first quota & ambient-prompt deduplication."""
-    raw_active = db.list_nodes(scope=project, as_of=None)
-    # Exclude low-priority P2 trivia, global P1 on-demand preferences (0t L0 contract),
-    # graduated mechanical guards, non-P0 code exemplars, and broken-ref cards from L0 wakeup kernel
+    """Build <= budget token L0 wakeup kernel with hierarchical scope inheritance & ambient-prompt deduplication."""
+    norm_target = normalize_scope(project, strict=False) if project and project.strip() else None
+    active_scopes = resolve_active_scopes(norm_target, extra_scopes=scopes)
+    raw_active = db.list_nodes(scopes=active_scopes or None, as_of=None)
+
+    def _is_target_scope(n: CompiledNode) -> bool:
+        if not norm_target:
+            return False
+        n_norm = normalize_scope(n.scope, strict=False)
+        if scope_kind(norm_target) == "repo":
+            return scope_kind(n_norm) == "repo" and canonical_repo_name(n_norm) == canonical_repo_name(norm_target)
+        return n_norm == norm_target
+
+    # Exclude low-priority P2 trivia, global & inherited-domain P1 on-demand preferences (0t L0 contract),
+    # repo-root ambient AGENTS.md/CLAUDE.md/GEMINI.md duplicates (already auto-loaded by coding agents),
+    # graduated mechanical guards, non-P0 code exemplars, and broken-ref cards from L0 wakeup kernel.
     active = [
         n
         for n in raw_active
         if (n.severity != "P2" or n.type == "principle")
         and not (n.scope == "global" and n.severity != "P0")
+        and not (scope_kind(n.scope) == "domain" and not _is_target_scope(n) and n.severity != "P0")
+        and not (
+            norm_target
+            and scope_kind(norm_target) == "repo"
+            and _is_target_scope(n)
+            and is_repo_root_ambient_doc(n.scope, n.source_ref)
+        )
         and not n.graduated
         and not (n.compat.get("pattern") == "code_exemplar" and n.severity != "P0")
         and check_source_freshness(n.source_ref, n.source_hash) != "broken_ref"
     ]
-    if project is None:
+    if norm_target is None and not active_scopes:
         global_or_p0 = [n for n in active if n.scope == "global" or n.severity == "P0" or n.type == "principle"]
         if global_or_p0:
             active = global_or_p0
 
-    def _global_rank(n: CompiledNode) -> tuple[int, int, int, int, str]:
+    def _inherited_rank(n: CompiledNode) -> tuple[int, int, int, int, int, str]:
         non_ambient = 0 if _is_ambient_global_doc(n) else 1
+        # Prefer more specific mounted domain redlines over generic global when both are P0
+        spec_depth = scope_depth(n.scope) if (norm_target or active_scopes) else 0
         tier = 4 if (n.type == "principle" or n.severity == "P0") else (3 if n.type == "decision" else 2)
-        return (non_ambient, tier, len(n.seen_dates), n.seen_count, n.valid_from)
+        return (non_ambient, spec_depth, tier, len(n.seen_dates), n.seen_count, n.valid_from)
 
     def _proj_rank(n: CompiledNode) -> tuple[int, int, int, int, str]:
         is_p0 = 1 if n.severity == "P0" else 0
@@ -271,20 +301,26 @@ def query_snapshot_boot(
         return (is_p0, kind_pri, len(n.seen_dates), n.seen_count, n.valid_from)
 
     snap_ver = db.get_meta("snapshot_version", "unknown")
-    header = f"# FOS L0 (scope={project or 'all'}, {snap_ver})"
+    header_scope = norm_target or (",".join(scopes) if scopes else "all")
+    header = f"# FOS L0 (scope={header_scope}, {snap_ver})"
     used = estimate_tokens(header)
     lines = [header]
     entries: list[dict[str, Any]] = []
 
     def _format_boot_line(node: CompiledNode) -> str:
         base = build_l0_line(node) if node.rule else (node.l0 or build_l0_line(node))
-        if project is None:
+        if norm_target is None:
             if node.scope and node.scope != "global" and f"({node.scope})" not in base:
                 return f"{base} ({node.scope})"
             return base
-        # When project-scoped, header already states scope=<project>; only tag cross-scope non-PRN items
-        if node.scope != project and node.scope == "global" and node.type != "principle":
-            return f"{base} (global)"
+        # When scoped to a target project/domain, header already states scope=<target>.
+        # Tag inherited domain/stack redlines and non-principle global items for clarity.
+        if not _is_target_scope(node):
+            if node.scope == "global":
+                if node.type != "principle" and "(global)" not in base:
+                    return f"{base} (global)"
+            elif node.scope and f"({node.scope})" not in base:
+                return f"{base} ({node.scope})"
         return base
 
     def _try_pack(candidates: list[CompiledNode], ceiling: int) -> list[CompiledNode]:
@@ -314,23 +350,24 @@ def query_snapshot_boot(
             )
         return skipped
 
-    if project:
-        proj_nodes = sorted([n for n in active if n.scope == project], key=_proj_rank, reverse=True)
-        glob_nodes = sorted([n for n in active if n.scope != project], key=_global_rank, reverse=True)
-        # Reserve up to 60% of available budget for project-specific memories first, then global redlines, then project slack
-        proj_ceiling = budget if not glob_nodes else (used + int(max(0, budget - used) * 0.60))
+    if norm_target:
+        proj_nodes = sorted([n for n in active if _is_target_scope(n)], key=_proj_rank, reverse=True)
+        inherited_nodes = sorted([n for n in active if not _is_target_scope(n)], key=_inherited_rank, reverse=True)
+        # Reserve up to 60% of available budget for target-specific memories first, then inherited P0 redlines, then slack
+        proj_ceiling = budget if not inherited_nodes else (used + int(max(0, budget - used) * 0.60))
         overflow_proj = _try_pack(proj_nodes, min(budget, proj_ceiling))
-        _try_pack(glob_nodes, budget)
+        _try_pack(inherited_nodes, budget)
         if overflow_proj and used < budget:
             _try_pack(overflow_proj, budget)
     else:
-        ordered = sorted(active, key=_global_rank, reverse=True)
+        ordered = sorted(active, key=_inherited_rank, reverse=True)
         _try_pack(ordered, budget)
 
     return {
         "mode": mode,
         "snapshot_version": snap_ver,
         "project": project,
+        "active_scopes": active_scopes,
         "budget_tokens": budget,
         "used_tokens": used,
         "count": len(entries),
@@ -347,6 +384,7 @@ def query_snapshot_recall(
     reranker: Any | None = None,
     kind: str | None = None,
     scope: str | None = None,
+    scopes: list[str] | None = None,
     as_of: str | None = None,
     budget: int = 1200,
     limit: int = 20,
@@ -361,8 +399,12 @@ def query_snapshot_recall(
 
     excluded = {str(x).strip() for x in (exclude_ids or ()) if str(x).strip()}
 
-    # Candidate universe filtered by scope, kind, and bi-temporal validity
-    valid_nodes = db.list_nodes(scope=scope, kind=kind, as_of=as_of)
+    # Only filter candidate scopes when explicit `scope` or `scopes` is provided;
+    # keep `scope=None, scopes=None` unfiltered for cross-repo recall (`cwd_stack` remains orthogonal for SemVer compat).
+    active_scopes = resolve_active_scopes(scope, extra_scopes=scopes) if (scope or scopes) else []
+
+    # Candidate universe filtered by hierarchical active scopes, kind, and bi-temporal validity
+    valid_nodes = db.list_nodes(scopes=active_scopes or None, kind=kind, as_of=as_of)
     valid_map: dict[str, CompiledNode] = {n.id: n for n in valid_nodes}
     if not valid_map:
         return {
@@ -370,6 +412,7 @@ def query_snapshot_recall(
             "snapshot_version": db.get_meta("snapshot_version", "unknown"),
             "query": query,
             "scope": scope,
+            "active_scopes": active_scopes,
             "kind": kind,
             "as_of": as_of,
             "budget_tokens": budget,
@@ -510,13 +553,27 @@ def query_snapshot_recall(
             * (1.0 + math.log(1.0 + max(1, node.seen_count)))
             * recency_weight(node.valid_from, ref_time, half_life_days=half_life)
         )
-        # Calibrated scope prior: prevent generic global P0s from crowding out exact-repo P1/P2 memories
-        if scope and scope != "global":
-            if node.scope == scope:
+        # Calibrated hierarchical scope prior:
+        # exact target (1.40) > stack depth-3 (1.24) > specialty depth-2 (1.16) > domain depth-1 (1.08) > global (1.0/0.78)
+        norm_req_scope = normalize_scope(scope, strict=False) if scope else None
+        if norm_req_scope and norm_req_scope != "global":
+            node_norm = normalize_scope(node.scope, strict=False)
+            is_exact = node_norm == norm_req_scope or (
+                scope_kind(norm_req_scope) == "repo"
+                and scope_kind(node_norm) == "repo"
+                and canonical_repo_name(node_norm) == canonical_repo_name(norm_req_scope)
+            )
+            if is_exact:
                 scope_boost = 1.40
+            elif scope_kind(node_norm) == "domain":
+                d = scope_depth(node_norm)
+                scope_boost = 1.24 if d >= 3 else (1.16 if d == 2 else 1.08)
             else:
                 direct_hits = len(q_terms & extract_stemmed_terms(node.rule))
                 scope_boost = 1.0 if direct_hits >= 2 else 0.78
+        elif scopes:
+            d = scope_depth(node.scope)
+            scope_boost = 1.28 if d >= 3 else (1.18 if d == 2 else (1.10 if d == 1 else 1.0))
         else:
             scope_boost = 1.08 if node.scope == "global" else 1.0
         fresh = check_source_freshness(node.source_ref, node.source_hash)
@@ -616,6 +673,7 @@ def query_snapshot_recall(
         "snapshot_version": db.get_meta("snapshot_version", "unknown"),
         "query": query,
         "scope": scope,
+        "active_scopes": active_scopes,
         "kind": kind,
         "as_of": as_of,
         "budget_tokens": budget,
@@ -633,6 +691,8 @@ def query_snapshot_mirror(
     reranker: Any | None = None,
     reasoner: Any | None = None,
     scope: str | None = None,
+    scopes: list[str] | None = None,
+    cwd_stack: dict[str, str] | None = None,
     mode: str = "online",
 ) -> dict[str, Any]:
     """Pre-decision AI-native mirror: 4 structured checks over principles, lessons, decisions, blind spots."""
@@ -642,6 +702,8 @@ def query_snapshot_mirror(
         embedder=embedder,
         reranker=reranker,
         scope=scope,
+        scopes=scopes,
+        cwd_stack=cwd_stack,
         budget=2400,
         limit=12,
         mode=mode,
@@ -740,8 +802,9 @@ def query_snapshot_mirror(
                     }
                 )
 
-    # Also surface superseded historical decisions in same scope so rejected options are visible
-    for node in db.list_nodes(scope=scope, kind="decision", include_inactive=True):
+    # Also surface superseded historical decisions in same active scope set so rejected options are visible
+    mirror_active_scopes = recalled.get("active_scopes") or None
+    for node in db.list_nodes(scope=None if mirror_active_scopes else scope, scopes=mirror_active_scopes, kind="decision", include_inactive=True):
         if node.status == "superseded" and node.id not in seen_decision_ids:
             node_terms = extract_stemmed_terms(node.rule + " " + " ".join(node.trigger_when + node.entities))
             if len(prop_stem_terms & node_terms) >= 2:
@@ -794,6 +857,7 @@ def query_snapshot_mirror(
         "snapshot_version": db.get_meta("snapshot_version", "unknown"),
         "proposal": proposal,
         "scope": scope,
+        "active_scopes": recalled.get("active_scopes") or [],
         "conflicts": conflicts,
         "lesson_warnings": lesson_warnings,
         "prior_decisions": prior_decisions,
@@ -1057,7 +1121,7 @@ class BrainEngine:
             raise UsageError("Content must be non-empty.")
 
         meta_clean = dict(meta or {})
-        scope_clean = scope or "global"
+        scope_clean = normalize_scope(scope, strict=source.startswith("manual"))
         raw_clean = content.strip()
         is_lifecycle_op = any(k in meta_clean for k in ("archives", "graduates", "supersedes", "reinforces"))
 
@@ -1259,9 +1323,15 @@ class BrainEngine:
             "node_count": node_count,
         }
 
-    def boot(self, *, project: str | None = None, budget: int = 300) -> dict[str, Any]:
+    def boot(
+        self,
+        *,
+        project: str | None = None,
+        scopes: list[str] | None = None,
+        budget: int = 300,
+    ) -> dict[str, Any]:
         with self.snapshots.open_current(read_only=True) as db:
-            return query_snapshot_boot(db, project=project, budget=budget, mode="online")
+            return query_snapshot_boot(db, project=project, scopes=scopes, budget=budget, mode="online")
 
     def recall(
         self,
@@ -1269,6 +1339,7 @@ class BrainEngine:
         *,
         kind: str | None = None,
         scope: str | None = None,
+        scopes: list[str] | None = None,
         as_of: str | None = None,
         budget: int = 1200,
         limit: int = 20,
@@ -1284,6 +1355,7 @@ class BrainEngine:
                 reranker=self.providers.reranker,
                 kind=kind,
                 scope=scope,
+                scopes=scopes,
                 as_of=as_of,
                 budget=budget,
                 limit=limit,
@@ -1331,7 +1403,14 @@ class BrainEngine:
                 result["graph"] = [e.to_dict() for e in edges]
             return result
 
-    def mirror(self, proposal: str, *, scope: str | None = None) -> dict[str, Any]:
+    def mirror(
+        self,
+        proposal: str,
+        *,
+        scope: str | None = None,
+        scopes: list[str] | None = None,
+        cwd_stack: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         if not proposal or not proposal.strip():
             raise UsageError("Proposal must be non-empty.")
         with self.snapshots.open_current(read_only=True) as db:
@@ -1342,6 +1421,8 @@ class BrainEngine:
                 reranker=self.providers.reranker,
                 reasoner=self.providers.reasoner,
                 scope=scope,
+                scopes=scopes,
+                cwd_stack=cwd_stack,
                 mode="online",
             )
 

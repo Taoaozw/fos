@@ -30,7 +30,8 @@ AI-native cognitive memory CLI backed by an always-on M3 Max brain (`fosd`) with
 ## Context & Token Discipline
 
 - **Prefer default compact text for reads**: `fos boot`, `fos recall`, and `fos mirror` emit dense TOON-style `[ID|SEV] rule` lines (~65% fewer tokens than JSON). Add `--json` or `--fields id,severity,rule` only when programmatically parsing output.
-- **Auto-detects project from `cwd`**: omit `--project` on `fos boot` inside a git repo (`--all` overrides).
+- **Auto-detects project & stack profile from `cwd`**: omit `--project` on `fos boot` inside a git repo (`--all` overrides); `fos` automatically mounts matching domain/stack branches (`eng/frontend/*`, `eng/backend/*`, `eng/ops`) and excludes repo-root `AGENTS.md`/`CLAUDE.md` duplicates from L0.
+- **Hierarchical scopes (<=3 levels, Least Upper Bound)**: reserve `global` for thin cross-industry meta-principles; scope reusable rules to `eng`, `eng/frontend[/stack]`, `eng/backend[/stack]`, `eng/ops`, `eng/ai`, `product`, `writing`, etc., and put cross-cutting facets (`security`, `perf`, `migration`) in `--entities`.
 - **Avoid re-fetching L0 rules**: pass `--exclude ID1,ID2` on `fos recall` when those cards are already complete in your L0 boot context.
 - **Progressive L0 -> L1 -> L2**: start with `boot` (L0) -> `recall` (L1) -> `get --tier L2` only when raw evidence is needed.
 - **On-demand discovery**: run `fos describe <cmd>` for exact flags/examples, or read `references/commands.md` for `ingest`, `dream`, `eval`, `undo`, `update`, and exit codes.

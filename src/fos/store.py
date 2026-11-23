@@ -13,6 +13,7 @@ from typing import Any
 
 from fos.errors import NotFoundError
 from fos.models import CompiledNode, GraphEdge, is_valid_at, now_iso
+from fos.scopes import normalize_scope, resolve_active_scopes
 from fos.state_db import StateDB
 from fos.tokens import is_stopword, tokenize_for_fts
 
@@ -374,15 +375,25 @@ class SnapshotDB:
         self,
         *,
         scope: str | None = None,
+        scopes: list[str] | set[str] | None = None,
         kind: str | None = None,
         as_of: str | None = None,
         include_inactive: bool = False,
     ) -> list[CompiledNode]:
         clauses: list[str] = []
         params: list[Any] = []
-        if scope:
-            clauses.append("(scope = ? OR scope = 'global')")
-            params.append(scope)
+        if scopes:
+            norm_scopes = sorted({normalize_scope(s, strict=False) for s in scopes if s and str(s).strip()})
+            if norm_scopes:
+                placeholders = ",".join("?" for _ in norm_scopes)
+                clauses.append(f"scope IN ({placeholders})")
+                params.extend(norm_scopes)
+        elif scope:
+            active_scopes = resolve_active_scopes(scope)
+            if active_scopes:
+                placeholders = ",".join("?" for _ in active_scopes)
+                clauses.append(f"scope IN ({placeholders})")
+                params.extend(active_scopes)
         if kind:
             clauses.append("type = ?")
             params.append(kind)

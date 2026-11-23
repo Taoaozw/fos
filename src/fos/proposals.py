@@ -29,6 +29,7 @@ from fos.errors import ExitCode, FosError, NotFoundError, UsageError
 from fos.freshness import check_source_freshness, load_usage_stats, node_utility_score
 from fos.models import CompiledNode, VALID_KINDS, normalize_severity, now_iso, parse_timestamp
 from fos.providers import HeuristicReasoner, Reasoner
+from fos.scopes import canonical_repo_name, infer_lub_scope, normalize_scope, scope_kind
 from fos.state_db import StateDB
 from fos.tokens import estimate_tokens as count_tokens, tokenize_for_fts, truncate_to_tokens
 from fos.ulid import new_ulid
@@ -457,9 +458,9 @@ def find_cross_repo_clusters(
         n
         for n in nodes
         if n.status == "active"
-        and n.scope != "global"
+        and scope_kind(n.scope) == "repo"
         and n.type in ("decision", "lesson", "principle")
-        and (allowed_scopes is None or n.scope.lower() in allowed_scopes)
+        and (allowed_scopes is None or canonical_repo_name(n.scope) in allowed_scopes)
     ]
     tok_map = {n.id: _meaningful_tokens(n) for n in scoped}
 
@@ -670,6 +671,7 @@ Return STRICT JSON ONLY:
       "topic_key": "short-english-slug-for-stable-dedup (e.g. shared-ui-component-boundary, merge-core-engineering-prns, billing-decimal-precision)",
       "title": "Concise Simplified Chinese title (<=28 chars)",
       "proposed_type": "principle" | "decision" | "lesson",
+      "proposed_scope": "Least Upper Bound scope (<=3 levels): `global` ONLY for universal cross-industry redlines, or domain/specialty/stack like `eng`, `eng/frontend`, `eng/frontend/shadcn`, `eng/backend/go`, `eng/ops`, `eng/ai`, `product`",
       "proposed_severity": "P0" | "P1",
       "proposed_rule": "Crisp, directly enforceable Simplified Chinese rule (1-2 sentences, concrete, no fluff)",
       "proposed_rationale": "Structural reason why this constraint prevents real engineering mistakes across projects",
@@ -686,8 +688,8 @@ STRICT GOVERNANCE RULES:
 - Return at most 6 high-compounding proposals. Quality > quantity! If nothing truly merits governance action, return `{"proposals": []}`.
 - `promote_global`: MUST be backed by actual memory nodes (`target_node_ids`) from >= 2 distinct owned repos!
   - NEVER propose generic tech-stack / language / framework / package-manager selection lists (e.g. "新建前端默认使用 React/Vite/Bun/Tailwind", "本地工具默认采用 Go/SQLite") just because multiple repos share manifest dependencies! Stack choices belong to templates/scaffolds, not global cognitive memory.
-  - Domain- or stack-conditional constraints (e.g. UI component encapsulation, billing precision, WebFlux backpressure) MUST use `proposed_type: "decision"` or `"lesson"` and `proposed_severity: "P1"` (strictly 0t L0, on-demand recall via `trigger_when`).
-  - Reserve `P0` + `principle` ONLY for unconditional, language-agnostic universal engineering redlines that apply to EVERY repo.
+  - Domain- or stack-conditional constraints (e.g. UI component encapsulation, billing precision, WebFlux backpressure, Go SQLite) MUST use the narrowest matching hierarchical `proposed_scope` (e.g. `eng/frontend/shadcn`, `eng/frontend`, `eng/backend/go`, `eng/backend/jvm`, `eng/ops`, `eng/ai`, `eng`) with `proposed_type: "decision"` or `"lesson"` and `proposed_severity: "P1"` (strictly 0t L0, on-demand recall via active scope profile + `trigger_when`).
+  - Reserve `proposed_scope: "global"` + `P0` + `principle` ONLY for unconditional, domain-agnostic meta-principles that apply across ALL projects and disciplines.
 - `merge_dedup`: If overlapping global P0 nodes say nearly the same thing, propose ONE crisp consolidated `P0` principle preserving EVERY unique constraint while cutting token bloat, listing ALL overlapping IDs in `target_node_ids`.
 - NEVER propose anything already covered by an active global node or a previously dismissed/pending proposal.
 - Output Simplified Chinese for `title`, `proposed_rule`, `proposed_rationale`, `proposed_guard_hint`, keeping tech identifiers/paths in original English."""
@@ -791,15 +793,17 @@ def _heuristic_synthesize(
         repos = cl["repos"]
         nodes = cl["nodes"]
         lead = nodes[0]
+        lub_scope = infer_lub_scope(nodes, fallback="eng")
         out.append(
             {
                 "kind": "promote_global",
                 "topic_key": f"cross-repo-pattern-{idx}-{'-'.join(repos[:2])}",
                 "title": f"跨仓复用规范（{' / '.join(repos[:3])}）",
                 "proposed_type": "decision" if lead.get("type") == "decision" else "lesson",
+                "proposed_scope": lub_scope,
                 "proposed_severity": "P1",
                 "proposed_rule": lead["rule"],
-                "proposed_rationale": f"该约定已在 {len(repos)} 个自有仓库（{', '.join(repos)}）独立重复出现，适合沉淀为全局 P1 按需召回偏好。",
+                "proposed_rationale": f"该约定已在 {len(repos)} 个自有仓库（{', '.join(repos)}）独立重复出现，适合提升至 `{lub_scope}` 作用域按需召回。",
                 "proposed_guard_hint": lead.get("guard_hint", ""),
                 "proposed_trigger_when": repos[:3],
                 "evidence_repos": repos,
@@ -958,14 +962,19 @@ def scan_proposals(
     )
 
     existing_globals = [
-        {"id": n.id, "type": n.type, "severity": n.severity, "rule": n.rule[:220]}
+        {"id": n.id, "scope": n.scope, "type": n.type, "severity": n.severity, "rule": n.rule[:220]}
         for n in active_nodes
-        if n.scope == "global"
+        if scope_kind(n.scope) in ("global", "domain")
     ]
     repo_rules_sample = [
         {"id": n.id, "scope": n.scope, "type": n.type, "severity": n.severity, "rule": n.rule[:180]}
         for n in sorted(
-            (x for x in active_nodes if x.scope != "global" and (cluster_scopes is None or x.scope.lower() in cluster_scopes)),
+            (
+                x
+                for x in active_nodes
+                if scope_kind(x.scope) == "repo"
+                and (cluster_scopes is None or canonical_repo_name(x.scope) in cluster_scopes)
+            ),
             key=lambda x: (x.severity, x.scope, x.id),
         )[:40]
     ]
@@ -1053,10 +1062,11 @@ def scan_proposals(
         node_repos: set[str] = set()
         for tid in target_ids:
             sc = node_map[tid].scope.lower()
-            if sc != "global":
-                node_repos.add(sc)
-                if sc not in ev_repos:
-                    ev_repos.append(sc)
+            if scope_kind(sc) == "repo":
+                bare_repo = canonical_repo_name(sc)
+                node_repos.add(bare_repo)
+                if bare_repo not in ev_repos:
+                    ev_repos.append(bare_repo)
         ev_repos = sorted(set(ev_repos))
 
         # Hard invariant: promote_global MUST be backed by actual memory nodes across >= 2 distinct repos
@@ -1117,7 +1127,17 @@ def scan_proposals(
         if ptype not in VALID_KINDS:
             ptype = "principle" if kind == "merge_dedup" else "decision"
         psev = normalize_severity(str(item.get("proposed_severity") or ("P0" if kind == "merge_dedup" else "P1")), kind=ptype)
-        pscope = "global" if kind in ("promote_global", "merge_dedup") else (node_map[target_ids[0]].scope if target_ids else "global")
+        raw_pscope = str(item.get("proposed_scope") or "").strip()
+        if kind == "promote_global":
+            if raw_pscope:
+                cand_scope = normalize_scope(raw_pscope, strict=False)
+                pscope = cand_scope if scope_kind(cand_scope) in ("global", "domain") else "global"
+            else:
+                pscope = "global"
+        elif kind == "merge_dedup":
+            pscope = normalize_scope(raw_pscope, strict=False) if raw_pscope else "global"
+        else:
+            pscope = node_map[target_ids[0]].scope if target_ids else "global"
 
         target_nodes = [node_map[tid] for tid in target_ids]
         ev_nodes = [
@@ -1190,6 +1210,7 @@ def accept_proposal(
     rationale: str | None = None,
     guard_hint: str | None = None,
     severity: str | None = None,
+    scope: str | None = None,
     trigger_when: list[str] | None = None,
     force: bool = False,
     device: str | None = None,
@@ -1213,6 +1234,7 @@ def accept_proposal(
     final_rationale = (rationale if rationale is not None else prop.proposed_rationale).strip()
     final_guard = (guard_hint if guard_hint is not None else prop.proposed_guard_hint).strip()
     final_severity = normalize_severity(severity or prop.proposed_severity, kind=prop.proposed_type)
+    final_scope = normalize_scope(scope, strict=True) if scope is not None else prop.proposed_scope
     final_triggers = list(trigger_when) if trigger_when is not None else list(prop.proposed_trigger_when)
 
     if not final_rule and prop.kind != "retire_stale":
@@ -1235,22 +1257,22 @@ def accept_proposal(
             details={"stale_node_ids": stale_ids},
         )
 
-    # Check global L0 300-token budget guard when adding/promoting P0
-    est_delta = _estimate_l0_delta(prop.kind, prop.proposed_scope, final_severity, final_rule, live_targets)
+    # Check global L0 300-token budget guard when adding/promoting global P0
+    est_delta = _estimate_l0_delta(prop.kind, final_scope, final_severity, final_rule, live_targets)
     current_l0 = _current_global_l0_tokens(engine)
     if (
-        prop.proposed_scope == "global"
+        final_scope == "global"
         and final_severity == "P0"
         and est_delta > 0
         and current_l0 + est_delta > L0_GLOBAL_BUDGET
         and not force
     ):
         raise ProposalStateError(
-            f"Accepting as P0 would exceed L0 budget ({current_l0} + {est_delta} > {L0_GLOBAL_BUDGET} tokens). "
-            "Accept as P1 instead, merge overlapping P0 nodes first, or pass force=true.",
+            f"Accepting as global P0 would exceed L0 budget ({current_l0} + {est_delta} > {L0_GLOBAL_BUDGET} tokens). "
+            "Accept as P1, narrow scope (e.g. `--scope eng/frontend`), merge overlapping P0 nodes first, or pass force=true.",
             exit_code=ExitCode.GATE_FAILED,
             error_code="L0_BUDGET_EXCEEDED",
-            hint="Downgrade severity to P1 so it recalls on-demand without consuming L0 wakeup tokens.",
+            hint="Downgrade severity to P1 or narrow `--scope` to a domain (e.g. `eng/frontend`) so it does not consume global L0 budget.",
             details={
                 "current_l0_tokens": current_l0,
                 "estimated_delta": est_delta,
@@ -1289,7 +1311,7 @@ def accept_proposal(
         write_result = engine.add_atom(
             kind=prop.proposed_type,
             content=final_rule,
-            scope=prop.proposed_scope,
+            scope=final_scope,
             source="manual:proposal",
             device=device,
             meta=meta,
@@ -1310,7 +1332,7 @@ def accept_proposal(
         write_result = engine.add_atom(
             kind=prop.proposed_type,
             content=final_rule,
-            scope=prop.proposed_scope,
+            scope=final_scope,
             source="manual:proposal",
             device=device,
             meta=meta,
@@ -1318,6 +1340,7 @@ def accept_proposal(
         result_node_id = (write_result.get("node") or {}).get("id")
 
     prop.status = "accepted"
+    prop.proposed_scope = final_scope
     prop.proposed_rule = final_rule
     prop.proposed_rationale = final_rationale
     prop.proposed_guard_hint = final_guard

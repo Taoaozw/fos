@@ -343,7 +343,7 @@ export function App() {
               <Input
                 value={addScope}
                 onChange={(e) => setAddScope(e.target.value)}
-                placeholder="scope (如 global / fos / goto)"
+                placeholder="scope (如 global / eng/frontend / eng/ops / fos)"
                 className="h-8 flex-1 font-mono text-xs"
               />
             </div>

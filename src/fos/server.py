@@ -31,6 +31,7 @@ from fos.proposals import (
     scan_proposals,
 )
 from fos.providers import CLISubprocessReasoner
+from fos.scopes import parse_scopes_param
 from fos.update import find_published_wheel
 
 _HOST_RE = re.compile(r"^[A-Za-z0-9.:\[\]-]+$")
@@ -54,6 +55,7 @@ class OutboxFlushRequest(BaseModel):
 class MirrorRequest(BaseModel):
     proposal: str
     scope: str | None = None
+    scopes: list[str] | None = None
 
 
 class DreamRequest(BaseModel):
@@ -88,6 +90,7 @@ class ProposalAcceptRequest(BaseModel):
     rationale: str | None = None
     guard_hint: str | None = None
     severity: str | None = None
+    scope: str | None = None
     trigger_when: list[str] | None = None
     force: bool = False
     device: str | None = None
@@ -101,6 +104,7 @@ class GuardCheckRequest(BaseModel):
     diff_text: str | None = None
     command: str | None = None
     scope: str | None = None
+    scopes: list[str] | None = None
 
 
 class GraduateRequest(BaseModel):
@@ -278,10 +282,12 @@ def create_app(
     @app.get("/v1/boot", dependencies=[Depends(require_auth)])
     def boot(
         project: str | None = Query(default=None),
+        scopes: str | None = Query(default=None),
         budget: int = Query(default=300, ge=32, le=4000),
     ) -> dict[str, Any]:
         try:
-            return brain.boot(project=project, budget=budget)
+            scope_list = parse_scopes_param(scopes) if scopes else None
+            return brain.boot(project=project, scopes=scope_list or None, budget=budget)
         except FosError as exc:
             raise _http_from_fos_error(exc) from exc
 
@@ -290,6 +296,7 @@ def create_app(
         q: str = Query(..., min_length=1),
         kind: str | None = Query(default=None),
         scope: str | None = Query(default=None),
+        scopes: str | None = Query(default=None),
         as_of: str | None = Query(default=None),
         budget: int = Query(default=1200, ge=64, le=16000),
         limit: int = Query(default=20, ge=1, le=100),
@@ -298,11 +305,13 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             stack_map = parse_stack_param(cwd_stack) if cwd_stack else None
+            scope_list = parse_scopes_param(scopes) if scopes else None
             excl_list = [x.strip() for x in exclude.split(",") if x.strip()] if exclude else None
             return brain.recall(
                 q,
                 kind=kind,
                 scope=scope,
+                scopes=scope_list or None,
                 as_of=as_of,
                 budget=budget,
                 limit=limit,
@@ -346,7 +355,7 @@ def create_app(
     @app.post("/v1/mirror", dependencies=[Depends(require_auth)])
     def mirror(req: MirrorRequest) -> dict[str, Any]:
         try:
-            return brain.mirror(req.proposal, scope=req.scope)
+            return brain.mirror(req.proposal, scope=req.scope, scopes=req.scopes)
         except FosError as exc:
             raise _http_from_fos_error(exc) from exc
 
@@ -461,6 +470,7 @@ def create_app(
                 rationale=req.rationale,
                 guard_hint=req.guard_hint,
                 severity=req.severity,
+                scope=req.scope,
                 trigger_when=req.trigger_when,
                 force=req.force,
                 device=req.device,
@@ -485,6 +495,7 @@ def create_app(
                 diff_text=req.diff_text,
                 command=req.command,
                 scope=req.scope,
+                scopes=req.scopes,
             )
         except FosError as exc:
             raise _http_from_fos_error(exc) from exc

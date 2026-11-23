@@ -228,7 +228,7 @@ export function CardsPanel({ dashboard, selectedNodeId, onSelectNode, filterPres
   const filteredNodes = useMemo(() => {
     const q = search.trim().toLowerCase()
     return dashboard.nodes.filter((n) => {
-      if (scope !== "__all__" && n.scope !== scope) return false
+      if (scope !== "__all__" && n.scope !== scope && !n.scope.startsWith(scope + "/")) return false
       if (status !== "__all__" && n.status !== status) return false
       if (severity !== "__all__" && n.severity !== severity) return false
       if (kind !== "__all__" && n.type !== kind) return false

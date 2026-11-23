@@ -137,8 +137,9 @@ def _print_result(data: Any, *, as_json: bool, command: str, fields: str | None 
             repos = ",".join(p.get("evidence_repos") or [])
             delta = p.get("estimated_l0_delta", 0)
             delta_s = f"+{delta}t" if delta > 0 else f"{delta}t"
+            pscope = p.get("proposed_scope") or "global"
             print(
-                f"  - [{p['id']}|{p['kind']}|{p['proposed_severity']}|L0:{delta_s}] {p.get('title', '')}"
+                f"  - [{p['id']}|{p['kind']}|{pscope}|{p['proposed_severity']}|L0:{delta_s}] {p.get('title', '')}"
                 + (f" ({repos})" if repos else "")
             )
             print(f"      {p.get('proposed_rule', '')}")
@@ -218,7 +219,8 @@ def build_parser() -> _StrictArgumentParser:
 
     # boot
     p_boot = sub.add_parser("boot", aliases=["b"], help="Emit <=300 token L0 wakeup kernel")
-    p_boot.add_argument("--project", type=str, default=None)
+    p_boot.add_argument("--project", "--scope", dest="project", type=str, default=None, help="Project or domain scope (default: auto-detect git repo)")
+    p_boot.add_argument("--scopes", type=str, default=None, help="Comma-separated extra domain/stack scopes to mount (e.g. eng/frontend,product)")
     p_boot.add_argument("--all", dest="all_scopes", action="store_true", help="Include all scopes (skip cwd auto-detect)")
     p_boot.add_argument("--budget", type=int, default=300)
     p_boot.add_argument("--hook", action="store_true", help="SessionStart hook mode (compact kernel only; silent when empty)")
@@ -229,7 +231,8 @@ def build_parser() -> _StrictArgumentParser:
     p_recall = sub.add_parser("recall", aliases=["rec", "r", "search"], help="4-way hybrid recall within token budget")
     p_recall.add_argument("query", type=str)
     p_recall.add_argument("--kind", type=str, default=None)
-    p_recall.add_argument("--scope", type=str, default=None)
+    p_recall.add_argument("--scope", type=str, default=None, help="Project or hierarchical domain scope (e.g. fos, eng/frontend, product)")
+    p_recall.add_argument("--scopes", type=str, default=None, help="Comma-separated mounted domain/stack scopes")
     p_recall.add_argument("--as-of", dest="as_of", type=str, default=None)
     p_recall.add_argument("--budget", type=int, default=1200)
     p_recall.add_argument("--limit", type=int, default=20)
@@ -247,7 +250,8 @@ def build_parser() -> _StrictArgumentParser:
     # mirror
     p_mirror = sub.add_parser("mirror", aliases=["mir", "check"], help="Pre-decision mirror review")
     p_mirror.add_argument("proposal", type=str)
-    p_mirror.add_argument("--scope", type=str, default=None)
+    p_mirror.add_argument("--scope", type=str, default=None, help="Project or hierarchical domain scope")
+    p_mirror.add_argument("--scopes", type=str, default=None, help="Comma-separated mounted domain/stack scopes")
     p_mirror.add_argument("--json", action="store_true")
 
     # add
@@ -353,6 +357,7 @@ def build_parser() -> _StrictArgumentParser:
     p_prop.add_argument("--reasoner", type=str, default=None, choices=["heuristic", "cli"], help="Reasoner override for scan")
     p_prop.add_argument("--cli-cmd", type=str, default=None, help="CLI reasoner command override")
     p_prop.add_argument("--severity", type=str, default=None, choices=["P0", "P1", "P2"], help="Severity override on accept")
+    p_prop.add_argument("--scope", type=str, default=None, help="Target scope override on accept (e.g. eng/frontend, eng/ops, global)")
     p_prop.add_argument("--rule", type=str, default=None, help="Rule override on accept")
     p_prop.add_argument("--reason", type=str, default="", help="Dismiss reason or rationale override")
     p_prop.add_argument("--force", action="store_true", help="Bypass scan cache or L0 budget guard")
@@ -519,20 +524,40 @@ def run_cli(argv: list[str] | None = None) -> int:
             if args.background and not as_json:
                 return int(ExitCode.OK)
         elif cmd == "boot":
-            project = None if args.all_scopes else (args.project or _detect_git_project())
-            result = client.boot(project=project, budget=args.budget)
+            from fos.scopes import canonical_repo_name, detect_repo_scopes, parse_scopes_param
+
+            explicit_scopes = parse_scopes_param(args.scopes)
+            git_proj = _detect_git_project()
+            if args.all_scopes:
+                project = None
+                mounted_scopes = explicit_scopes or None
+            else:
+                project = args.project if args.project is not None else (None if explicit_scopes else git_proj)
+                auto_scopes: list[str] = []
+                if project and git_proj and canonical_repo_name(project) == git_proj:
+                    auto_scopes = detect_repo_scopes(Path.cwd())
+                mounted_scopes = list(dict.fromkeys([*auto_scopes, *explicit_scopes])) or None
+            result = client.boot(project=project, scopes=mounted_scopes, budget=args.budget)
             if args.hook and not as_json and not fields:
                 _print_result(result, as_json=False, command="boot_hook")
                 return int(ExitCode.OK)
         elif cmd == "recall":
             from fos.code_pattern import detect_repo_stack_versions
+            from fos.scopes import canonical_repo_name, detect_repo_scopes, parse_scopes_param
 
             cwd_stack, _ = detect_repo_stack_versions(Path.cwd())
+            explicit_scopes = parse_scopes_param(args.scopes)
+            git_proj = _detect_git_project()
+            auto_scopes: list[str] = []
+            if args.scope and git_proj and canonical_repo_name(args.scope) == git_proj:
+                auto_scopes = detect_repo_scopes(Path.cwd(), cwd_stack=cwd_stack or None)
+            mounted_scopes = list(dict.fromkeys([*auto_scopes, *explicit_scopes])) or None
             excl = [x.strip() for x in args.exclude.split(",") if x.strip()] if args.exclude else None
             result = client.recall(
                 args.query,
                 kind=args.kind,
                 scope=args.scope,
+                scopes=mounted_scopes,
                 as_of=args.as_of,
                 budget=args.budget,
                 limit=args.limit,
@@ -542,7 +567,17 @@ def run_cli(argv: list[str] | None = None) -> int:
         elif cmd == "get":
             result = client.get(args.node_id, tier=args.tier, include_graph=args.graph)
         elif cmd == "mirror":
-            result = client.mirror(args.proposal, scope=args.scope)
+            from fos.scopes import canonical_repo_name, detect_repo_scopes, parse_scopes_param
+
+            explicit_scopes = parse_scopes_param(args.scopes)
+            git_proj = _detect_git_project()
+            auto_scopes = (
+                detect_repo_scopes(Path.cwd())
+                if (args.scope and git_proj and canonical_repo_name(args.scope) == git_proj)
+                else []
+            )
+            mounted_scopes = list(dict.fromkeys([*auto_scopes, *explicit_scopes])) or None
+            result = client.mirror(args.proposal, scope=args.scope, scopes=mounted_scopes)
         elif cmd == "add":
             entities = [e.strip() for e in args.entities.split(",") if e.strip()] if args.entities else None
             result = client.add(
@@ -623,6 +658,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                     rule=args.rule,
                     rationale=args.reason or None,
                     severity=args.severity,
+                    scope=args.scope,
                     force=args.force,
                 )
             elif args.action == "dismiss":
@@ -643,8 +679,13 @@ def run_cli(argv: list[str] | None = None) -> int:
                     raise UsageError("Usage: fos guard [--staged|--diff FILE|--cmd CMD] OR fos guard graduate <NODE_ID>")
             else:
                 from fos.guard import load_git_diff
+                from fos.scopes import canonical_repo_name, detect_repo_scopes, resolve_active_scopes
 
-                scope = args.scope or _detect_git_project()
+                git_proj = _detect_git_project()
+                scope = args.scope or git_proj
+                guard_scopes: list[str] | None = None
+                if scope and git_proj and canonical_repo_name(scope) == git_proj:
+                    guard_scopes = resolve_active_scopes(scope, extra_scopes=detect_repo_scopes(Path.cwd()))
                 diff_text: str | None = None
                 if args.diff_source == "-":
                     diff_text = sys.stdin.read()
@@ -652,7 +693,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                     diff_text = Path(args.diff_source).read_text(encoding="utf-8", errors="replace")
                 elif args.staged or not args.check_cmd:
                     diff_text = load_git_diff(staged=bool(args.staged))
-                result = client.guard_check(diff_text=diff_text, command=args.check_cmd, scope=scope)
+                result = client.guard_check(diff_text=diff_text, command=args.check_cmd, scope=scope, scopes=guard_scopes)
                 _print_result(result, as_json=as_json, command=cmd)
                 return int(ExitCode.OK if result.get("passed") else ExitCode.GATE_FAILED)
         elif cmd == "feedback":

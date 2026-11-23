@@ -5,10 +5,10 @@ Read this file on demand for evolution workflows (`ingest`, `dream`, `eval`, `un
 ## 1. Memory Retrieval & Inspection
 
 ```bash
-fos boot [--project P | --all] [--budget 300] [--fields id,severity,l0] [--json]
-fos recall "<query>" [--kind lesson|decision|thought|outcome|principle] [--scope P] [--as-of 2026-08] [--budget 1200] [--fields id,rule] [--json]
+fos boot [--project|--scope P | --all] [--scopes S1,S2] [--budget 300] [--fields id,severity,l0] [--json]
+fos recall "<query>" [--kind lesson|decision|thought|outcome|principle] [--scope P] [--scopes S1,S2] [--as-of 2026-08] [--budget 1200] [--fields id,rule] [--json]
 fos get <ID> [--tier L0|L1|L2] [--graph] [--json]
-fos mirror "<proposal>" [--scope P] [--json]
+fos mirror "<proposal>" [--scope P] [--scopes S1,S2] [--json]
 ```
 
 Short aliases: `b` (`boot`), `rec`/`r` (`recall`), `g` (`get`), `mir`/`check` (`mirror`), `a` (`add`), `cor`/`fix` (`correct`), `arc`/`retire` (`archive`), `s` (`sync`), `st` (`status`), `desc` (`describe`), `dr` (`dream`), `ev` (`eval`), `sk` (`skill`), `up` (`update`).

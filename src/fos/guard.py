@@ -129,12 +129,13 @@ def check_guard(
     diff_text: str | None = None,
     command: str | None = None,
     scope: str | None = None,
+    scopes: list[str] | None = None,
     record_utility: bool = True,
 ) -> dict[str, Any]:
     """Run deterministic 0-LLM static guardrail checks against active FlowOS nodes."""
     t0 = time.perf_counter()
     with engine.snapshots.open_current(read_only=True) as db:
-        candidates: list[CompiledNode] = db.list_nodes(scope=scope, as_of=None)
+        candidates: list[CompiledNode] = db.list_nodes(scope=None if scopes else scope, scopes=scopes, as_of=None)
 
     guard_nodes = [n for n in candidates if n.guard_pattern.strip()]
     added_lines = parse_unified_diff_added_lines(diff_text) if diff_text else []
