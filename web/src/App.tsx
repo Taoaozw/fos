@@ -44,6 +44,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { ApiError, fosApi, getStoredToken, setStoredToken } from "@/lib/api"
+import { DEFAULT_REMOTE_GIT_ROOT, resolveDefaultBrainUrl } from "@/lib/connect-templates"
 import { spinOnce, usePanelTransition, useSlidingIndicator } from "@/lib/motion"
 import { SCOPE_ALL } from "@/lib/scope-tree"
 import {
@@ -66,6 +67,10 @@ export function App() {
   const [addSeverity, setAddSeverity] = useState("P1")
   const [addScope, setAddScope] = useState("global")
   const [addContent, setAddContent] = useState("")
+  const [connectBrainUrl, setConnectBrainUrl] = useState<string>(() =>
+    resolveDefaultBrainUrl(typeof window !== "undefined" ? window.location?.origin : undefined)
+  )
+  const [connectGitRoot, setConnectGitRoot] = useState<string>(DEFAULT_REMOTE_GIT_ROOT)
   const refreshIconRef = useRef<HTMLSpanElement | null>(null)
   const tabPanelRef = useRef<HTMLDivElement | null>(null)
   const tabsListRef = useRef<HTMLDivElement | null>(null)
@@ -422,7 +427,14 @@ export function App() {
             </TabsContent>
 
             <TabsContent value="connect">
-              <ConnectPanel health={healthQuery.data} token={token} />
+              <ConnectPanel
+                health={healthQuery.data}
+                token={token}
+                brainUrl={connectBrainUrl}
+                onBrainUrlChange={setConnectBrainUrl}
+                remoteGitRoot={connectGitRoot}
+                onRemoteGitRootChange={setConnectGitRoot}
+              />
             </TabsContent>
           </div>
         )}

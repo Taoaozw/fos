@@ -312,10 +312,14 @@ def _eval_fidelity(
     failures: list[dict[str, Any]] = []
 
     # 1. Explicit must_preserve_terms from golden cases (resolve by evidence_ids first so re-numbered dream snapshots match the right card)
-    atom_to_nodes: dict[str, list[str]] = {}
+    atom_to_active: dict[str, list[str]] = {}
     for n in nodes:
         for eid in n.evidence_ids:
-            atom_to_nodes.setdefault(eid, []).append(n.id)
+            atom_to_active.setdefault(eid, []).append(n.id)
+    retired_eids: set[str] = set()
+    for n in db.list_nodes(as_of="all"):
+        if n.status != "active":
+            retired_eids.update(n.evidence_ids)
 
     case_terms_by_node: dict[str, list[str]] = {}
     for c in cases:
@@ -324,9 +328,26 @@ def _eval_fidelity(
         target_ids: list[str] = []
         if c.evidence_ids:
             for eid in c.evidence_ids:
-                for nid in atom_to_nodes.get(eid, []):
+                for nid in atom_to_active.get(eid, []):
                     if nid not in target_ids:
                         target_ids.append(nid)
+            if not target_ids:
+                # If all referenced evidence was explicitly retired/superseded, do not flag as missing.
+                if all(eid in retired_eids for eid in c.evidence_ids):
+                    continue
+                # Unresolved golden must_preserve_terms must fail loudly instead of passing with checked_nodes=0.
+                checked += 1
+                required_total += len(c.must_preserve_terms)
+                failures.append(
+                    {
+                        "node_id": c.node_id or c.id,
+                        "severity": "P0",
+                        "missing_constraints": [t.lower() for t in c.must_preserve_terms],
+                        "rule": "",
+                        "reason": "evidence_ids unresolved in candidate snapshot",
+                    }
+                )
+                continue
         elif c.node_id:
             target_ids.append(c.node_id)
         for tid in target_ids:

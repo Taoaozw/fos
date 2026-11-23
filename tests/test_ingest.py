@@ -338,3 +338,83 @@ def test_cross_device_evidence_ref_dedup_and_stage_only_ingest(tmp_path: Path) -
     )
     assert r2["deduplicated"] is True
     assert len(engine.ledger.load_all_atoms()) == 1
+
+
+def test_codex_patrol_regressions_dream_ids_rebuild_etiquette_and_outbox(tmp_path: Path) -> None:
+    import pytest
+    from fos.dream import run_dream
+    from fos.engine import BrainEngine
+    from fos.errors import NotFoundError
+
+    # 1. Staged doc + live manual decision + archive manual decision -> dream must archive the manual decision, NOT the staged doc
+    engine = BrainEngine(tmp_path / "brain")
+    engine.add_atom(
+        kind="decision",
+        scope="fops",
+        source="hindsight:docs:fops",
+        content="Hindsight: [ARCHITECTURE.md · Cache] Use SQLite WAL for offline cache persistence.",
+        meta={"evidence_ref": "doc:docs/ARCHITECTURE.md#Cache:abc123"},
+        stage_only=True,
+    )
+    manual = engine.add_atom(
+        kind="decision",
+        scope="fops",
+        source="manual",
+        content="Use fixed port 7622 for internal daemon testing only.",
+    )
+    manual_id = manual["node"]["id"]
+    assert manual_id == "DEC-001"
+
+    # Invalid archive target must raise BEFORE writing a poison atom into ledger_atoms
+    before_count = len(engine.ledger.load_all_atoms())
+    with pytest.raises(NotFoundError):
+        engine.add_atom(
+            kind="outcome",
+            scope="fops",
+            source="manual:archive",
+            content="Archive DEC-999",
+            meta={"archives": "DEC-999"},
+        )
+    assert len(engine.ledger.load_all_atoms()) == before_count
+
+    engine.archive_node(manual_id, reason="no longer needed")
+
+    # rebuild_from_ledger must NOT leak staged raw atoms into active snapshot
+    engine.rebuild_from_ledger()
+    with engine.snapshots.open_current(read_only=True) as db:
+        active_after_rebuild = db.list_nodes(scope="fops")
+        assert all("ARCHITECTURE.md" not in n.rule for n in active_after_rebuild)
+        assert db.get_node(manual_id).status == "archived"
+
+    # Dream must keep manual_id archived (not archive the staged doc instead)
+    run_dream(engine, no_gate=True)
+    with engine.snapshots.open_current(read_only=True) as db:
+        m_node = db.get_node(manual_id)
+        assert m_node is not None and m_node.status == "archived"
+        assert "7622" in m_node.rule
+
+    # 2. Line-level etiquette stripping preserves concrete technical constraint in the same section
+    doc_dir = tmp_path / "repo-mixed"
+    doc_dir.mkdir()
+    (doc_dir / "LESSONS.md").write_text(
+        "## Rules\n"
+        "- Reply in Simplified Chinese.\n"
+        "- Verify changes before concluding.\n"
+        "- Every lease renewal MUST carry a monotonic fencing token validated by the storage backend.\n",
+        encoding="utf-8",
+    )
+    events = collect_hindsight_events("docs", root_dir=doc_dir, cursor_path=tmp_path / "c2.json", limit=10)
+    assert len(events) == 1
+    assert "fencing token" in events[0]["raw"]
+    assert "Simplified Chinese" not in events[0]["raw"]
+    first_ref = events[0]["meta"]["evidence_ref"]
+
+    # Updating the doc section produces a new evidence_ref hash so updates are not silently dropped
+    (doc_dir / "LESSONS.md").write_text(
+        "## Rules\n"
+        "- Every lease renewal MUST carry a monotonic 64-bit fencing token validated atomically by PostgreSQL.\n",
+        encoding="utf-8",
+    )
+    events2 = collect_hindsight_events("docs", root_dir=doc_dir, cursor_path=tmp_path / "c2.json", limit=10)
+    assert len(events2) == 1
+    assert events2[0]["meta"]["evidence_ref"] != first_ref

@@ -418,11 +418,16 @@ def publish_cli_wheel(project_root: Path, brain_data_dir: Path) -> dict[str, Any
     if proc.returncode != 0:
         raise FosError(f"uv build failed: {(proc.stderr or proc.stdout).strip()}")
 
-    found = find_published_wheel(dist_dir)
-    if not found:
+    wheels = sorted(dist_dir.glob("fos-*.whl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not wheels:
         raise FosError(f"No wheel found in {dist_dir} after build.")
-    ver, wheel, digest = found
-    (dist_dir / "VERSION").write_text(f"{ver}\n", encoding="utf-8")
+    wheel = wheels[0]
+    parts = wheel.name.split("-")
+    ver = parts[1] if len(parts) >= 2 and parts[1] else __version__
+    digest = sha256_file(wheel)
+    tmp_ver = dist_dir / "VERSION.tmp"
+    tmp_ver.write_text(f"{ver}\n", encoding="utf-8")
+    os.replace(tmp_ver, dist_dir / "VERSION")
     return {
         "version": ver,
         "wheel": str(wheel),

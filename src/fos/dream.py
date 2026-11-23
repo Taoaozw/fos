@@ -496,6 +496,11 @@ def _compile_dream_nodes(
     promoted_p0 = 0
     conflicts_found = 0
 
+    # Reserve all explicit live node_ids so sequential allocation for unassigned/staged atoms never steals them
+    reserved_ids: set[str] = {
+        str(atom.meta["node_id"]) for atom in cleaned if atom.meta.get("node_id")
+    }
+
     for atom in cleaned:
         meta = dict(atom.meta)
 
@@ -721,6 +726,8 @@ def _compile_dream_nodes(
                 counters[parts[0]] = max(counters.get(parts[0], 0), int(parts[1]))
         else:
             counters[prefix] = counters.get(prefix, 0) + 1
+            while f"{prefix}-{counters[prefix]:03d}" in reserved_ids or f"{prefix}-{counters[prefix]:03d}" in nodes_by_id:
+                counters[prefix] += 1
             node_id = f"{prefix}-{counters[prefix]:03d}"
 
         source_ref, source_hash = resolve_legacy_source_ref(atom_scope, atom.source, meta)

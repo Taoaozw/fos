@@ -21,9 +21,25 @@ fi
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 WHEEL="$TMP_DIR/{{WHEEL_NAME}}"
+EXPECTED_SHA='{{WHEEL_SHA256}}'
 
 echo "Downloading fos CLI wheel from $BRAIN ..."
 curl -fsSL -H "Authorization: Bearer $TOKEN" "$BRAIN/v1/cli/download" -o "$WHEEL"
+
+if [ -n "$EXPECTED_SHA" ]; then
+  if command -v shasum >/dev/null 2>&1; then
+    ACTUAL_SHA="$(shasum -a 256 "$WHEEL" | awk '{print $1}')"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL_SHA="$(sha256sum "$WHEEL" | awk '{print $1}')"
+  else
+    echo "error: neither shasum nor sha256sum is available to verify wheel integrity" >&2
+    exit 1
+  fi
+  if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+    echo "error: SHA-256 mismatch for $WHEEL (expected $EXPECTED_SHA, got $ACTUAL_SHA)" >&2
+    exit 1
+  fi
+fi
 
 echo "Installing fos via uv tool..."
 uv tool install --force --reinstall "$WHEEL"

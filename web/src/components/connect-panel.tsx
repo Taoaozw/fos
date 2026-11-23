@@ -46,6 +46,7 @@ import {
   isViteDevUrl,
   normalizeBrainUrl,
   resolveDefaultBrainUrl,
+  validateBrainUrl,
 } from "@/lib/connect-templates"
 import { useRevealGroup } from "@/lib/motion"
 import type { HealthResponse } from "@/lib/types"
@@ -53,6 +54,10 @@ import type { HealthResponse } from "@/lib/types"
 interface ConnectPanelProps {
   health?: HealthResponse
   token: string
+  brainUrl: string
+  onBrainUrlChange: (value: string) => void
+  remoteGitRoot: string
+  onRemoteGitRootChange: (value: string) => void
 }
 
 async function copyText(text: string): Promise<boolean> {
@@ -159,15 +164,20 @@ const SUPPORTED_SKILL_TOOLS = [
   { tool: "Pi", dir: "~/.pi/agent/skills/fos" },
 ]
 
-export function ConnectPanel({ health, token }: ConnectPanelProps) {
+export function ConnectPanel({
+  health,
+  token,
+  brainUrl,
+  onBrainUrlChange,
+  remoteGitRoot,
+  onRemoteGitRootChange,
+}: ConnectPanelProps) {
   const defaultOrigin = useMemo(() => {
     return resolveDefaultBrainUrl(
       typeof window !== "undefined" ? window.location?.origin : undefined
     )
   }, [])
 
-  const [brainUrl, setBrainUrl] = useState<string>(defaultOrigin)
-  const [remoteGitRoot, setRemoteGitRoot] = useState<string>(DEFAULT_REMOTE_GIT_ROOT)
   const [includeRealToken, setIncludeRealToken] = useState<boolean>(false)
   const [promptTab, setPromptTab] = useState<string>("setup")
   const [methodTab, setMethodTab] = useState<string>("one-line")
@@ -180,11 +190,19 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
     duration: 0.24,
   })
 
+  const urlError = validateBrainUrl(brainUrl)
   const effectiveUrl = normalizeBrainUrl(brainUrl)
   const effectiveToken = includeRealToken && token ? token : TOKEN_PLACEHOLDER
   const loopbackWarning = isLoopbackUrl(effectiveUrl)
-  const viteDevWarning = isViteDevUrl(effectiveUrl)
+  const viteDevWarning = isViteDevUrl(brainUrl)
   const cliPublished = Boolean(health?.cli_version)
+
+  const handleBrainUrlChange = (next: string) => {
+    if (includeRealToken && normalizeBrainUrl(next) !== effectiveUrl) {
+      setIncludeRealToken(false)
+    }
+    onBrainUrlChange(next)
+  }
 
   const installCmd = useMemo(
     () => buildInstallCommand(effectiveUrl, effectiveToken),
@@ -271,7 +289,7 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
               <Input
                 id="fos-brain-url"
                 value={brainUrl}
-                onChange={(e) => setBrainUrl(e.target.value)}
+                onChange={(e) => handleBrainUrlChange(e.target.value)}
                 placeholder="http://100.x.y.z:7622"
                 className="font-mono text-xs"
               />
@@ -281,7 +299,7 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
                   variant="outline"
                   size="sm"
                   className="shrink-0 rounded-lg text-xs"
-                  onClick={() => setBrainUrl(defaultOrigin)}
+                  onClick={() => handleBrainUrlChange(defaultOrigin)}
                 >
                   <IconRefresh className="size-3.5" />
                   重置
@@ -300,7 +318,7 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
             <Input
               id="fos-remote-git-root"
               value={remoteGitRoot}
-              onChange={(e) => setRemoteGitRoot(e.target.value)}
+              onChange={(e) => onRemoteGitRootChange(e.target.value)}
               placeholder="~/projects"
               className="font-mono text-xs"
             />
@@ -347,8 +365,15 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
         </div>
 
         {/* Dynamic Readiness Alerts */}
-        {(loopbackWarning || viteDevWarning || !cliPublished) && (
+        {(urlError || loopbackWarning || viteDevWarning || !cliPublished) && (
           <div className="flex flex-col gap-2">
+            {urlError && (
+              <Alert variant="destructive" className="py-2.5">
+                <IconAlertTriangle className="size-4" />
+                <AlertTitle className="text-xs font-semibold">大脑地址格式无效</AlertTitle>
+                <AlertDescription className="text-xs">{urlError}</AlertDescription>
+              </Alert>
+            )}
             {viteDevWarning && (
               <Alert variant="destructive" className="py-2.5">
                 <IconAlertTriangle className="size-4" />
@@ -359,7 +384,7 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
                     size="sm"
                     variant="outline"
                     className="h-6 rounded-md px-2 text-[11px]"
-                    onClick={() => setBrainUrl(resolveDefaultBrainUrl(effectiveUrl))}
+                    onClick={() => handleBrainUrlChange(resolveDefaultBrainUrl(brainUrl))}
                   >
                     改为 :{DEFAULT_BRAIN_PORT}
                   </Button>
@@ -715,7 +740,7 @@ export function ConnectPanel({ health, token }: ConnectPanelProps) {
           <div className="flex flex-col gap-1">
             <h3 className="text-xs font-semibold text-foreground">网络连通性（Tailscale / 局域网）</h3>
             <p className="text-xs leading-relaxed text-muted-foreground">
-              主机需以 <Kbd>fosd serve --host 0.0.0.0 --port 7622</Kbd> 监听。同一 Wi-Fi 下可用局域网 IP；外出或跨网络强烈建议通过{" "}
+              主机须先运行 <Kbd>fosd init</Kbd> 开启 Bearer 鉴权，再以 <Kbd>fosd serve --host 0.0.0.0 --port 7622</Kbd> 监听。同一 Wi-Fi 下可用局域网 IP；外出或跨网络强烈建议通过{" "}
               <strong>Tailscale</strong> 访问（地址固定且自带加密隧道），无需暴露公网端口。
             </p>
           </div>

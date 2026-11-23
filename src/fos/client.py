@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from fos.config import FosConfig, default_fos_home, load_config, save_config
 from fos.dream import run_dream
@@ -157,6 +158,28 @@ class FosClient:
             raise OfflineError("Brain is unreachable and no local offline cache exists. Run `fos sync` when online.")
         return SnapshotDB(self.cache_db_path, enable_vec=False, read_only=True)
 
+    @contextlib.contextmanager
+    def _outbox_lock(self) -> Iterator[None]:
+        """Cross-process advisory lock around outbox.jsonl appends and chunked removals."""
+        self.outbox_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.outbox_path.with_suffix(".lock")
+        with lock_path.open("a+", encoding="utf-8") as lfh:
+            try:
+                import fcntl
+
+                fcntl.flock(lfh.fileno(), fcntl.LOCK_EX)
+            except ImportError:
+                pass
+            try:
+                yield
+            finally:
+                try:
+                    import fcntl
+
+                    fcntl.flock(lfh.fileno(), fcntl.LOCK_UN)
+                except ImportError:
+                    pass
+
     def _queue_outbox(self, item: dict[str, Any]) -> dict[str, Any]:
         # Always redact before touching disk even in offline outbox
         red = redact_secrets(item["content"])
@@ -172,12 +195,29 @@ class FosClient:
             "source": item.get("source") or "manual",
             "content": red.text,
             "meta": meta,
+            "stage_only": bool(item.get("stage_only", False)),
         }
-        self.outbox_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.outbox_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-            fh.flush()
+        with self._outbox_lock():
+            with self.outbox_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+                fh.flush()
         return record
+
+    def _prune_outbox_ids(self, accepted_ids: set[str]) -> list[dict[str, Any]]:
+        """Re-read outbox under lock, remove accepted IDs, and atomically replace file."""
+        with self._outbox_lock():
+            current = self._read_outbox()
+            remaining = [x for x in current if x.get("id") not in accepted_ids]
+            if remaining:
+                tmp = self.outbox_path.with_suffix(".jsonl.tmp")
+                tmp.write_text(
+                    "".join(json.dumps(x, ensure_ascii=False, separators=(",", ":")) + "\n" for x in remaining),
+                    encoding="utf-8",
+                )
+                os.replace(tmp, self.outbox_path)
+            elif self.outbox_path.exists():
+                self.outbox_path.unlink()
+            return remaining
 
     def _read_outbox(self) -> list[dict[str, Any]]:
         if not self.outbox_path.exists():
@@ -229,33 +269,29 @@ class FosClient:
                 "cached_nodes": len(bundle.get("nodes") or []),
             }
 
-        pending = self._read_outbox()
+        with self._outbox_lock():
+            pending = self._read_outbox()
         flushed = 0
         remaining: list[dict[str, Any]] = list(pending)
         if pending:
             chunk_size = 5
             write_timeout = max(self.timeout_s, 60.0)
-            next_remaining: list[dict[str, Any]] = []
             for idx in range(0, len(pending), chunk_size):
                 chunk = pending[idx : idx + chunk_size]
+                chunk_ids = {str(item.get("id")) for item in chunk if item.get("id")}
                 resp = self._request(
                     "POST",
                     "/v1/sync/outbox",
                     json_body={"atoms": chunk},
                     timeout_s=write_timeout,
                 )
-                accepted_ids = set(resp.get("accepted") or [])
+                accepted_ids = set(resp.get("accepted") or []) & chunk_ids
                 flushed += len(accepted_ids)
-                next_remaining.extend(item for item in chunk if item.get("id") not in accepted_ids)
-                tail = next_remaining + pending[idx + chunk_size :]
-                if tail:
-                    self.outbox_path.write_text(
-                        "".join(json.dumps(x, ensure_ascii=False, separators=(",", ":")) + "\n" for x in tail),
-                        encoding="utf-8",
-                    )
-                elif self.outbox_path.exists():
-                    self.outbox_path.unlink()
-            remaining = next_remaining
+                if accepted_ids:
+                    remaining = self._prune_outbox_ids(accepted_ids)
+                else:
+                    with self._outbox_lock():
+                        remaining = self._read_outbox()
 
         bundle = self._request("GET", "/v1/sync/snapshot", timeout_s=max(self.timeout_s, 15.0))
         snap_ver = self._save_offline_snapshot(bundle)
@@ -693,6 +729,7 @@ class FosClient:
             elif res.get("deduplicated"):
                 deduplicated += 1
             ingested.append(res)
+        staged_count = sum(1 for r in ingested if r.get("staged"))
         return {
             "source": source,
             "since": since,
@@ -700,7 +737,7 @@ class FosClient:
             "ingested": len(ingested) - queued - deduplicated,
             "deduplicated": deduplicated,
             "queued_offline": queued,
-            "staged_for_dream": True,
+            "staged_for_dream": bool(staged_count == (len(ingested) - queued - deduplicated)) if (len(ingested) - queued - deduplicated) > 0 else True,
         }
 
     # --- Brain maintenance operations ---

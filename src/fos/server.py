@@ -261,8 +261,13 @@ def create_app(
         base_url = _brain_base_url(request)
         published = find_published_wheel(dist_dir)
         wheel_name = published[1].name if published is not None else f"fos-{__version__}-py3-none-any.whl"
+        wheel_sha = published[2] if published is not None else ""
         tmpl = resources.files("fos.assets").joinpath("install.sh").read_text(encoding="utf-8")
-        rendered = tmpl.replace("{{BRAIN}}", base_url).replace("{{WHEEL_NAME}}", wheel_name)
+        rendered = (
+            tmpl.replace("{{BRAIN}}", base_url)
+            .replace("{{WHEEL_NAME}}", wheel_name)
+            .replace("{{WHEEL_SHA256}}", wheel_sha)
+        )
         return PlainTextResponse(rendered, media_type="text/plain; charset=utf-8", headers={"Cache-Control": "no-cache"})
 
     @app.get("/v1/cli/version", dependencies=[Depends(require_auth)])
@@ -431,7 +436,7 @@ def create_app(
                     ts=item.ts,
                     stage_only=item.stage_only,
                 )
-                accepted.append(res["atom"]["id"])
+                accepted.append(item.id or res["atom"]["id"])
             except FosError as exc:
                 errors.append({"id": item.id, "error": str(exc)})
         return {

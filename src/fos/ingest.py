@@ -432,10 +432,10 @@ _GENERIC_AGENT_ETIQUETTE_RE = re.compile(
 )
 
 
-def _is_generic_agent_etiquette(body: str) -> bool:
-    """Return True when a doc section is mostly generic agent etiquette boilerplate."""
-    matches = _GENERIC_AGENT_ETIQUETTE_RE.findall(body)
-    return len(matches) >= 2
+def _strip_generic_agent_etiquette_lines(body: str) -> str:
+    """Remove generic agent etiquette boilerplate lines while preserving concrete technical constraints."""
+    kept = [line for line in body.splitlines() if not _GENERIC_AGENT_ETIQUETTE_RE.search(line)]
+    return "\n".join(kept).strip()
 
 
 def _strip_doc_tool_boilerplate(text: str) -> str:
@@ -482,7 +482,7 @@ def _collect_docs_events(
     events: list[dict[str, Any]] = []
     seen_hashes: set[str] = set()
 
-    candidates: list[tuple[str, str, Path]] = []  # (scope, source_label, path)
+    candidates: list[tuple[str, str, str, Path]] = []  # (scope, source_label, rel_label, path)
 
     # 1. Global user agent rule files (only when scanning default workspace, not custom test root)
     if root_dir is None:
@@ -495,13 +495,13 @@ def _collect_docs_events(
         ):
             p = home / rel
             if p.is_file():
-                candidates.append(("global", f"hindsight:docs:global:{p.parent.name}", p))
+                candidates.append(("global", f"hindsight:docs:global:{p.parent.name}", rel, p))
         rules_dir = home / ".claude" / "rules"
         if rules_dir.is_dir():
             for p in sorted(rules_dir.glob("*.md")):
-                candidates.append(("global", "hindsight:docs:global:claude-rules", p))
+                candidates.append(("global", "hindsight:docs:global:claude-rules", f".claude/rules/{p.name}", p))
 
-    # 2. Repository AGENTS.md / LESSONS.md / docs/FRONTEND.md / docs/DESIGN.md / docs/agents/*.md
+    # 2. Repository LESSONS.md / docs/FRONTEND.md / docs/DESIGN.md / docs/ARCHITECTURE.md / docs/agents/*.md
     def _add_repo_docs(repo_dir: Path) -> None:
         rscope = repo_dir.name.lower()
         rsrc = f"hindsight:docs:{rscope}"
@@ -512,7 +512,7 @@ def _collect_docs_events(
                 rp = p.resolve()
                 if rp not in seen_paths:
                     seen_paths.add(rp)
-                    candidates.append((rscope, rsrc, p))
+                    candidates.append((rscope, rsrc, rel, p))
         agents_dir = repo_dir / "docs" / "agents"
         if agents_dir.is_dir():
             for p in sorted(agents_dir.glob("*.md")):
@@ -520,7 +520,7 @@ def _collect_docs_events(
                     rp = p.resolve()
                     if rp not in seen_paths:
                         seen_paths.add(rp)
-                        candidates.append((rscope, rsrc, p))
+                        candidates.append((rscope, rsrc, f"docs/agents/{p.name}", p))
 
     repos = _discover_git_repos(root_dir)
     for repo in repos:
@@ -532,7 +532,7 @@ def _collect_docs_events(
         if base.is_dir():
             _add_repo_docs(base)
 
-    for scope, source_label, fpath in candidates:
+    for scope, source_label, rel_label, fpath in candidates:
         if len(events) >= limit:
             break
         try:
@@ -563,10 +563,12 @@ def _collect_docs_events(
             if len(events) >= limit:
                 completed_file = False
                 break
-            if _is_generic_agent_etiquette(body):
+            filtered_body = _strip_generic_agent_etiquette_lines(body)
+            if len(filtered_body) < 40:
                 continue
-            payload_text = f"Hindsight: [{fpath.name} · {heading}]\n{body}"
+            payload_text = f"Hindsight: [{fpath.name} · {heading}]\n{filtered_body}"
             red = redact_secrets(payload_text)
+            sec_hash = hashlib.sha256(f"{heading}\n{filtered_body}".encode("utf-8")).hexdigest()[:10]
             events.append(
                 {
                     "kind": kind,
@@ -577,12 +579,12 @@ def _collect_docs_events(
                     "meta": {
                         "severity": severity,
                         "collector": "docs",
-                        "doc_file": fpath.name,
+                        "doc_file": rel_label,
                         "doc_section": heading,
                         "source_ref": f"{fpath.resolve()}#{heading[:60]}",
                         "source_hash": digest,
                         "verified_at": datetime.now(timezone.utc).date().isoformat(),
-                        "evidence_ref": f"doc:{fpath.name}#{heading[:40]}",
+                        "evidence_ref": f"doc:{rel_label}#{heading[:40]}:{sec_hash}",
                         "redacted_types": list(red.redacted_types),
                     },
                 }

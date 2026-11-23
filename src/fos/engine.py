@@ -997,6 +997,9 @@ class BrainEngine:
         self.ledger = LedgerStore(self.data_dir)
         self.snapshots = SnapshotManager(self.data_dir, embedding_dim=self.providers.embedder.dim)
         self.snapshots.ensure_initialized()
+        # In-memory cache of rule-only embeddings keyed by (embedder_model, rule_text)
+        # so surprise gating keeps exact rule-to-rule parity without re-embedding the bucket on every write.
+        self._rule_vec_cache: dict[tuple[str, str], list[float]] = {}
 
     @classmethod
     def from_config(cls, cfg: FosConfig, *, home: Path | None = None) -> BrainEngine:
@@ -1302,6 +1305,7 @@ class BrainEngine:
         # Stage-only automated ingest: persist raw atom to ledger for `fos dream` distillation
         # without polluting live active snapshot cards with un-distilled commits/docs.
         if stage_only and not is_lifecycle_op:
+            meta_clean["staged"] = True
             atom = LedgerAtom(
                 id=atom_id or new_atom_id(),
                 ts=ts or now_iso(),
@@ -1331,22 +1335,28 @@ class BrainEngine:
         if not is_lifecycle_op:
             with self.snapshots.open_current(read_only=True) as db:
                 existing_active = db.list_nodes(scope=None if scope_clean == "global" else scope_clean, as_of=None)
-                same_bucket = [n for n in existing_active if n.scope == scope_clean and n.type == kind]
-                cached_vecs = db.get_node_vectors([n.id for n in same_bucket]) if same_bucket else {}
+            same_bucket = [n for n in existing_active if n.scope == scope_clean and n.type == kind]
             if same_bucket:
                 probe_text = str(meta_clean.get("rule") or raw_clean)
-                probe_vecs = self.providers.embedder.embed([probe_text])
-                if probe_vecs:
-                    probe_vec = probe_vecs[0]
-                    probe_dim = len(probe_vec)
-                    missing_nodes = [
-                        n for n in same_bucket if len(cached_vecs.get(n.id) or ()) != probe_dim
+                emb_key_prefix = f"{type(self.providers.embedder).__name__}:{self.providers.embedder.model_name}"
+                missing_texts: list[str] = []
+                for n in same_bucket:
+                    ck = (emb_key_prefix, n.rule)
+                    if ck not in self._rule_vec_cache and n.rule not in missing_texts:
+                        missing_texts.append(n.rule)
+                to_embed = [probe_text] + missing_texts
+                vecs = self.providers.embedder.embed(to_embed)
+                if len(vecs) == len(to_embed):
+                    probe_vec = vecs[0]
+                    for txt, vec in zip(missing_texts, vecs[1:]):
+                        if len(self._rule_vec_cache) >= 2048:
+                            self._rule_vec_cache.clear()
+                        self._rule_vec_cache[(emb_key_prefix, txt)] = vec
+                    pairs = [
+                        (n, self._rule_vec_cache[(emb_key_prefix, n.rule)])
+                        for n in same_bucket
+                        if (emb_key_prefix, n.rule) in self._rule_vec_cache
                     ]
-                    if missing_nodes:
-                        miss_vecs = self.providers.embedder.embed([n.rule for n in missing_nodes])
-                        for n, v in zip(missing_nodes, miss_vecs):
-                            cached_vecs[n.id] = v
-                    pairs = [(n, cached_vecs[n.id]) for n in same_bucket if n.id in cached_vecs]
                     if pairs:
                         surprise_info = evaluate_surprise(probe_text, probe_vec, pairs)
                         if surprise_info["classification"] == "redundant" and not source.startswith("manual") and surprise_info["closest_node_id"]:
@@ -1354,6 +1364,25 @@ class BrainEngine:
                             meta_clean["reinforces"] = surprise_info["closest_node_id"]
                         elif surprise_info["classification"] == "conflict" and surprise_info["closest_node_id"]:
                             meta_clean["surprise_conflict_with"] = surprise_info["closest_node_id"]
+
+        # Validate lifecycle targets & reserve stable node_id BEFORE persisting to immutable ledger
+        sup_id = meta_clean.get("supersedes")
+        arc_id = meta_clean.get("archives")
+        grad_id = meta_clean.get("graduates")
+        edit_id = meta_clean.get("edits")
+        reinforces_id = meta_clean.get("reinforces")
+        with self.snapshots.open_current(read_only=True) as db:
+            if sup_id and db.get_node(str(sup_id)) is None:
+                raise NotFoundError(f"Supersedes target node not found: {sup_id}")
+            if arc_id and db.get_node(str(arc_id)) is None:
+                raise NotFoundError(f"Archive target node not found: {arc_id}")
+            if grad_id and db.get_node(str(grad_id)) is None:
+                raise NotFoundError(f"Graduate target node not found: {grad_id}")
+            if edit_id and db.get_node(str(edit_id)) is None:
+                raise NotFoundError(f"Edit target node not found: {edit_id}")
+            # Assign stable node_id on live manual creation so Dream replay of staged atoms never shifts manual card IDs
+            if source.startswith("manual") and not any((arc_id, grad_id, edit_id, reinforces_id)) and not meta_clean.get("node_id"):
+                meta_clean["node_id"] = db.next_sequence_id(KIND_PREFIX.get(kind, "MEM"))
 
         atom = LedgerAtom(
             id=atom_id or new_atom_id(),
@@ -1371,19 +1400,6 @@ class BrainEngine:
 
         # Index immediately into current active snapshot
         with self.snapshots.open_current() as db:
-            # Verify supersedes/archives/graduates target exists if provided
-            sup_id = persisted.meta.get("supersedes")
-            if sup_id and db.get_node(str(sup_id)) is None:
-                raise NotFoundError(f"Supersedes target node not found: {sup_id}")
-            arc_id = persisted.meta.get("archives")
-            if arc_id and db.get_node(str(arc_id)) is None:
-                raise NotFoundError(f"Archive target node not found: {arc_id}")
-            grad_id = persisted.meta.get("graduates")
-            if grad_id and db.get_node(str(grad_id)) is None:
-                raise NotFoundError(f"Graduate target node not found: {grad_id}")
-            edit_id = persisted.meta.get("edits")
-            if edit_id and db.get_node(str(edit_id)) is None:
-                raise NotFoundError(f"Edit target node not found: {edit_id}")
             node, superseded = self._compile_atom_into_db(db, persisted, synthesize_eval=True)
             db.set_meta("atom_count", str(len(self.ledger.load_all_atoms())))
             snap_ver = db.get_meta("snapshot_version", self.snapshots.current_version() or "v0001")
@@ -1643,6 +1659,8 @@ class BrainEngine:
             db.set_meta("embedding_model", self.providers.embedder.model_name)
             db.set_meta("built_at", now_iso())
             for atom in atoms:
+                if atom.meta.get("staged"):
+                    continue
                 self._compile_atom_into_db(db, atom, synthesize_eval=False)
             db.set_meta("atom_count", str(len(atoms)))
             node_count = db.count_nodes()
