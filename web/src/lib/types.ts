@@ -241,7 +241,7 @@ export interface DreamResponse {
   gate?: EvalResponse
 }
 
-export type ProposalKind = "promote_global" | "merge_dedup" | "retire_stale"
+export type ProposalKind = "promote_global" | "merge_dedup" | "retire_stale" | "fix_drifted"
 export type ProposalStatus = "pending" | "accepted" | "dismissed" | "expired"
 
 export interface ProposalEvidenceNode {

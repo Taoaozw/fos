@@ -44,10 +44,10 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
         return 0.0
     return dot / (na * nb)
 
-ProposalKind = Literal["promote_global", "merge_dedup", "retire_stale"]
+ProposalKind = Literal["promote_global", "merge_dedup", "retire_stale", "fix_drifted"]
 ProposalStatus = Literal["pending", "accepted", "dismissed", "expired"]
 
-VALID_PROPOSAL_KINDS: tuple[str, ...] = ("promote_global", "merge_dedup", "retire_stale")
+VALID_PROPOSAL_KINDS: tuple[str, ...] = ("promote_global", "merge_dedup", "retire_stale", "fix_drifted")
 VALID_PROPOSAL_STATUSES: tuple[str, ...] = ("pending", "accepted", "dismissed", "expired")
 
 L0_GLOBAL_BUDGET = 300
@@ -657,8 +657,8 @@ def find_stale_candidates(
 _PROPOSAL_SYSTEM_PROMPT = """You are the FlowOS Architectural Governance & Cross-Project Taste Synthesizer.
 Your job is to inspect:
 1. Existing active GLOBAL principles/decisions (DO NOT propose duplicates of what already exists in global!).
-2. Cross-repo card clusters (rules/decisions that independently appeared across >= 2 of the user's own repos).
-3. Cross-repo tech-stack manifest frequencies (real stacks used across >= 2 of the user's own repos).
+2. Cross-repo card clusters (enforceable engineering rules/pitfalls/decisions that independently appeared across >= 2 of the user's own repos).
+3. Cross-repo tech-stack manifest frequencies (contextual background ONLY — NEVER generate stack-selection shopping lists from manifests alone!).
 4. Overlapping GLOBAL nodes (candidates for `merge_dedup` to save precious 300-token L0 wakeup budget).
 5. Stale candidates (optional `retire_stale`).
 
@@ -667,29 +667,29 @@ Return STRICT JSON ONLY:
   "proposals": [
     {
       "kind": "promote_global" | "merge_dedup" | "retire_stale",
-      "topic_key": "short-english-slug-for-stable-dedup (e.g. frontend-shadcn-tokens, merge-core-engineering-prns, backend-go-single-binary)",
+      "topic_key": "short-english-slug-for-stable-dedup (e.g. shared-ui-component-boundary, merge-core-engineering-prns, billing-decimal-precision)",
       "title": "Concise Simplified Chinese title (<=28 chars)",
       "proposed_type": "principle" | "decision" | "lesson",
       "proposed_severity": "P0" | "P1",
       "proposed_rule": "Crisp, directly enforceable Simplified Chinese rule (1-2 sentences, concrete, no fluff)",
-      "proposed_rationale": "Structural reason why this preference compounds across projects",
+      "proposed_rationale": "Structural reason why this constraint prevents real engineering mistakes across projects",
       "proposed_guard_hint": "Optional static lint / CI / review check (or empty string)",
       "proposed_trigger_when": ["2-4 concise Chinese/English recall cues"],
       "evidence_repos": ["repo1", "repo2"],
-      "target_node_ids": ["NODE-IDs: for promote_global list supporting repo node IDs; for merge_dedup list ALL overlapping global node IDs to supersede; for retire_stale list node IDs to archive"],
+      "target_node_ids": ["NODE-IDs: for promote_global MUST list >=2 supporting repo node IDs from >=2 distinct repos; for merge_dedup list ALL overlapping global node IDs to supersede; for retire_stale list node IDs to archive"],
       "confidence": 0.85
     }
   ]
 }
 
 STRICT GOVERNANCE RULES:
-- Return at most 6 high-compounding proposals. Quality > quantity!
-- `promote_global`: MUST be backed by >= 2 distinct owned repos (either in cross-repo card clusters or manifest frequencies).
-  - Tech-stack / UI / frontend / backend / database preferences MUST default to `proposed_severity: "P1"` (on-demand recall via `trigger_when`, preserving the 300-token L0 wakeup kernel!).
-  - Reserve `P0` ONLY for unconditional universal principles.
-  - Consolidate closely related stack signals into cohesive architectural preferences (e.g., ONE crisp frontend stack & shadcn/token preference rather than 5 separate micro-proposals for React, Vite, Bun, Tailwind, shadcn).
-- `merge_dedup`: If overlapping global P0 nodes say nearly the same thing (e.g. PRN-003/004/009), propose ONE crisp consolidated `P0` principle preserving EVERY unique constraint while cutting token bloat, listing ALL overlapping IDs in `target_node_ids`.
-- NEVER propose something already covered by an active global node unless it is a `merge_dedup` consolidation.
+- Return at most 6 high-compounding proposals. Quality > quantity! If nothing truly merits governance action, return `{"proposals": []}`.
+- `promote_global`: MUST be backed by actual memory nodes (`target_node_ids`) from >= 2 distinct owned repos!
+  - NEVER propose generic tech-stack / language / framework / package-manager selection lists (e.g. "新建前端默认使用 React/Vite/Bun/Tailwind", "本地工具默认采用 Go/SQLite") just because multiple repos share manifest dependencies! Stack choices belong to templates/scaffolds, not global cognitive memory.
+  - Domain- or stack-conditional constraints (e.g. UI component encapsulation, billing precision, WebFlux backpressure) MUST use `proposed_type: "decision"` or `"lesson"` and `proposed_severity: "P1"` (strictly 0t L0, on-demand recall via `trigger_when`).
+  - Reserve `P0` + `principle` ONLY for unconditional, language-agnostic universal engineering redlines that apply to EVERY repo.
+- `merge_dedup`: If overlapping global P0 nodes say nearly the same thing, propose ONE crisp consolidated `P0` principle preserving EVERY unique constraint while cutting token bloat, listing ALL overlapping IDs in `target_node_ids`.
+- NEVER propose anything already covered by an active global node or a previously dismissed/pending proposal.
 - Output Simplified Chinese for `title`, `proposed_rule`, `proposed_rationale`, `proposed_guard_hint`, keeping tech identifiers/paths in original English."""
 
 
@@ -700,6 +700,38 @@ def _proposal_fingerprint(kind: str, topic_key: str, target_ids: list[str]) -> s
     else:
         raw = f"{kind}:{','.join(sorted(target_ids))}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _proposal_tokens(title: str, rule: str, triggers: list[str] | None = None) -> set[str]:
+    text = f"{title} {rule} {' '.join(triggers or [])}"
+    return {t for t in tokenize_for_fts(text).split() if len(t) >= 2 and t not in _STOP_TOKENS}
+
+
+def _is_similar_proposal(
+    *,
+    kind: str,
+    title: str,
+    rule: str,
+    triggers: list[str],
+    target_ids: list[str],
+    existing: Proposal,
+) -> bool:
+    """Catch rephrased/renamed duplicate proposals even when LLM invents a different topic_key."""
+    if existing.kind != kind:
+        return False
+    t_new = set(target_ids)
+    t_old = set(existing.target_node_ids)
+    if t_new and t_old:
+        overlap = len(t_new & t_old) / max(1, min(len(t_new), len(t_old)))
+        if overlap >= 0.50:
+            return True
+    tok_new = _proposal_tokens(title, rule, triggers)
+    tok_old = _proposal_tokens(existing.title, existing.proposed_rule, existing.proposed_trigger_when)
+    if tok_new and tok_old:
+        jacc = len(tok_new & tok_old) / max(1, len(tok_new | tok_old))
+        if jacc >= 0.35:
+            return True
+    return False
 
 
 def _estimate_l0_delta(
@@ -764,10 +796,10 @@ def _heuristic_synthesize(
                 "kind": "promote_global",
                 "topic_key": f"cross-repo-pattern-{idx}-{'-'.join(repos[:2])}",
                 "title": f"跨仓复用规范（{' / '.join(repos[:3])}）",
-                "proposed_type": "principle",
+                "proposed_type": "decision" if lead.get("type") == "decision" else "lesson",
                 "proposed_severity": "P1",
                 "proposed_rule": lead["rule"],
-                "proposed_rationale": f"该约定已在 {len(repos)} 个自有仓库（{', '.join(repos)}）独立重复出现，适合沉淀为全局 P1 偏好。",
+                "proposed_rationale": f"该约定已在 {len(repos)} 个自有仓库（{', '.join(repos)}）独立重复出现，适合沉淀为全局 P1 按需召回偏好。",
                 "proposed_guard_hint": lead.get("guard_hint", ""),
                 "proposed_trigger_when": repos[:3],
                 "evidence_repos": repos,
@@ -775,28 +807,6 @@ def _heuristic_synthesize(
                 "confidence": 0.78,
             }
         )
-
-    # Group recurring frontend stack tags if >=2 repos share React + TypeScript or shadcn
-    fe_tags = [t for t in ("React", "TypeScript", "Vite", "Tailwind CSS v4", "shadcn/ui", "shadcn Base UI", "Bun") if t in recurring_manifests]
-    if len(fe_tags) >= 2:
-        fe_repos = sorted({r for t in fe_tags for r in recurring_manifests[t]})
-        if len(fe_repos) >= 2:
-            out.append(
-                {
-                    "kind": "promote_global",
-                    "topic_key": "frontend-react-ts-shadcn-stack",
-                    "title": "前端默认技术栈与组件规范",
-                    "proposed_type": "principle",
-                    "proposed_severity": "P1",
-                    "proposed_rule": f"新建独立前端项目优先采用 {' + '.join(fe_tags[:6])}，统一使用共享 UI 组件与语义主题 Token，禁止裸写原生交互控件或硬编码调色板颜色。",
-                    "proposed_rationale": f"在 {len(fe_repos)} 个自有仓库（{', '.join(fe_repos)}）中持续复用同一套前端栈。",
-                    "proposed_guard_hint": "通过 ESLint 限制共享组件目录外的原生交互标签与硬编码色值。",
-                    "proposed_trigger_when": ["新建前端", "React TypeScript", "shadcn UI", "Tailwind"],
-                    "evidence_repos": fe_repos,
-                    "target_node_ids": [],
-                    "confidence": 0.84,
-                }
-            )
 
     for st in stale_candidates[:3]:
         rot_reason = st.get("rot_reason", "aged_unhit")
@@ -840,8 +850,16 @@ def _heuristic_synthesize(
 
 
 def _current_global_l0_tokens(engine: BrainEngine) -> int:
-    boot = engine.boot(project=None, budget=4000)
-    return int(boot.get("used_tokens", 0))
+    with engine.snapshots.open_current(read_only=True) as db:
+        active = db.list_nodes(as_of=None)
+    p0_globals = [
+        n
+        for n in active
+        if n.status == "active" and n.scope == "global" and n.severity == "P0" and not n.graduated
+    ]
+    if not p0_globals:
+        return 0
+    return sum(count_tokens(n.l0 or build_l0_line(n)) + 1 for n in p0_globals)
 
 
 def _expire_stale_pending(store: ProposalStore, active_node_ids: set[str]) -> int:
@@ -852,9 +870,9 @@ def _expire_stale_pending(store: ProposalStore, active_node_ids: set[str]) -> in
             continue
         dt = parse_timestamp(p.created_at)
         age_expired = dt is not None and (now_dt - dt).total_seconds() > PROPOSAL_EXPIRY_DAYS * 86400
-        # For merge_dedup / retire_stale, if any required target is no longer active, expire it
+        # For merge_dedup / retire_stale / fix_drifted, if any required target is no longer active, expire it
         target_gone = (
-            p.kind in ("merge_dedup", "retire_stale")
+            p.kind in ("merge_dedup", "retire_stale", "fix_drifted")
             and bool(p.target_node_ids)
             and any(tid not in active_node_ids for tid in p.target_node_ids)
         )
@@ -971,13 +989,26 @@ def scan_proposals(
     used_cache = False
     raw_items: list[dict[str, Any]] | None = None
 
+    # Index existing proposals before synthesis so LLM avoids previously dismissed/pending topics
+    existing_all = store.load_all()
+    pending_list = [p for p in existing_all if p.status == "pending"]
+    dismissed_list = [p for p in existing_all if p.status == "dismissed"]
+    accepted_list = [p for p in existing_all if p.status == "accepted"]
+
     if not force and cache.get("signal_hash") == signal_hash and isinstance(cache.get("raw_items"), list):
         raw_items = cache["raw_items"]
         used_cache = True
     elif not isinstance(active_reasoner, HeuristicReasoner):
+        prompt_payload = dict(signal_payload)
+        avoid_list = [
+            {"status": p.status, "kind": p.kind, "title": p.title, "rule": p.proposed_rule[:140]}
+            for p in (pending_list + dismissed_list)[-12:]
+        ]
+        if avoid_list:
+            prompt_payload["existing_proposals_to_avoid"] = avoid_list
         prompt = (
             "Analyze the user's cross-project signals below and return high-compounding governance proposals.\n\n"
-            + json.dumps(signal_payload, ensure_ascii=False, indent=2)
+            + json.dumps(prompt_payload, ensure_ascii=False, indent=2)
         )
         resp = active_reasoner.complete_json(prompt, system=_PROPOSAL_SYSTEM_PROMPT)
         if resp and isinstance(resp.get("proposals"), list):
@@ -999,11 +1030,9 @@ def scan_proposals(
             stale_candidates=stale_candidates,
         )
 
-    # Index existing proposals by fingerprint for dedup & monotonic dismissal cooldown
-    existing_all = store.load_all()
-    pending_by_fp = {p.fingerprint: p for p in existing_all if p.status == "pending"}
-    dismissed_by_fp = {p.fingerprint: p for p in existing_all if p.status == "dismissed"}
-    accepted_fps = {p.fingerprint for p in existing_all if p.status == "accepted"}
+    pending_by_fp = {p.fingerprint: p for p in pending_list}
+    dismissed_by_fp = {p.fingerprint: p for p in dismissed_list}
+    accepted_fps = {p.fingerprint for p in accepted_list}
     pending_count = len(pending_by_fp)
 
     manifest_by_repo = {m["repo"]: m for m in repo_manifests}
@@ -1021,26 +1050,61 @@ def scan_proposals(
 
         target_ids = [str(tid) for tid in (item.get("target_node_ids") or []) if str(tid) in node_map]
         ev_repos = sorted({str(r).strip().lower() for r in (item.get("evidence_repos") or []) if str(r).strip()})
+        node_repos: set[str] = set()
         for tid in target_ids:
             sc = node_map[tid].scope.lower()
-            if sc != "global" and sc not in ev_repos:
-                ev_repos.append(sc)
+            if sc != "global":
+                node_repos.add(sc)
+                if sc not in ev_repos:
+                    ev_repos.append(sc)
         ev_repos = sorted(set(ev_repos))
 
-        # Hard invariant: promote_global MUST have >= 2 distinct repos of evidence
-        if kind == "promote_global" and len([r for r in ev_repos if r != "global"]) < 2:
+        # Hard invariant: promote_global MUST be backed by actual memory nodes across >= 2 distinct repos
+        # (never bare manifest stack-selection lists with zero cross-repo memory evidence).
+        if kind == "promote_global" and len(node_repos) < 2:
             continue
         if kind == "merge_dedup" and len(target_ids) < 2:
             continue
         if kind == "retire_stale" and len(target_ids) < 1:
             continue
 
+        title_cand = str(item.get("title") or rule[:28]).strip()[:60]
+        triggers_cand = [str(t).strip() for t in (item.get("proposed_trigger_when") or []) if str(t).strip()][:5]
         fp = _proposal_fingerprint(kind, str(item.get("topic_key") or item.get("title") or ""), target_ids)
-        if fp in pending_by_fp or fp in accepted_fps:
+
+        if (
+            fp in pending_by_fp
+            or fp in accepted_fps
+            or any(
+                _is_similar_proposal(
+                    kind=kind,
+                    title=title_cand,
+                    rule=rule,
+                    triggers=triggers_cand,
+                    target_ids=target_ids,
+                    existing=prev,
+                )
+                for prev in (pending_list + accepted_list)
+            )
+        ):
             skipped_existing += 1
             continue
-        if fp in dismissed_by_fp:
-            prev_repos = set(dismissed_by_fp[fp].evidence_repos)
+
+        matched_dismissed = dismissed_by_fp.get(fp)
+        if matched_dismissed is None:
+            for prev in dismissed_list:
+                if _is_similar_proposal(
+                    kind=kind,
+                    title=title_cand,
+                    rule=rule,
+                    triggers=triggers_cand,
+                    target_ids=target_ids,
+                    existing=prev,
+                ):
+                    matched_dismissed = prev
+                    break
+        if matched_dismissed is not None:
+            prev_repos = set(matched_dismissed.evidence_repos)
             # Only wake up a dismissed proposal if a brand-new repo adds fresh corroborating evidence
             if not (set(ev_repos) - prev_repos):
                 skipped_cooldown += 1
@@ -1049,9 +1113,9 @@ def scan_proposals(
         if pending_count >= MAX_PENDING_PROPOSALS:
             break
 
-        ptype = str(item.get("proposed_type") or "principle")
+        ptype = str(item.get("proposed_type") or ("principle" if kind == "merge_dedup" else "decision"))
         if ptype not in VALID_KINDS:
-            ptype = "principle"
+            ptype = "principle" if kind == "merge_dedup" else "decision"
         psev = normalize_severity(str(item.get("proposed_severity") or ("P0" if kind == "merge_dedup" else "P1")), kind=ptype)
         pscope = "global" if kind in ("promote_global", "merge_dedup") else (node_map[target_ids[0]].scope if target_ids else "global")
 
@@ -1091,6 +1155,7 @@ def scan_proposals(
         )
         store.save(prop)
         pending_by_fp[fp] = prop
+        pending_list.append(prop)
         pending_count += 1
         created.append(prop)
 
@@ -1163,7 +1228,7 @@ def accept_proposal(
         ]
         live_targets = [n for n in target_nodes if n is not None and n.status == "active"]
 
-    if stale_ids and prop.kind in ("merge_dedup", "retire_stale") and not force:
+    if stale_ids and prop.kind in ("merge_dedup", "retire_stale", "fix_drifted") and not force:
         raise ProposalStateError(
             f"Target nodes changed since scan ({', '.join(stale_ids)}); re-scan or pass force=true.",
             error_code="EVIDENCE_STALE",
@@ -1204,7 +1269,7 @@ def accept_proposal(
             archived_ids.append(n.id)
         write_result = {"archived": archived_ids}
         result_node_id = archived_ids[0] if archived_ids else None
-    elif prop.kind == "merge_dedup":
+    elif prop.kind in ("merge_dedup", "fix_drifted"):
         sup_ids = [n.id for n in live_targets]
         meta: dict[str, Any] = {
             "severity": final_severity,
@@ -1215,6 +1280,8 @@ def accept_proposal(
             "proposal_id": prop.id,
             "proposal_kind": prop.kind,
         }
+        if prop.kind == "fix_drifted" and live_targets and live_targets[0].source_ref:
+            meta["source_ref"] = live_targets[0].source_ref
         if sup_ids:
             meta["supersedes"] = sup_ids[0]
             if len(sup_ids) > 1:

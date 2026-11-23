@@ -243,11 +243,13 @@ def query_snapshot_boot(
 ) -> dict[str, Any]:
     """Build <= budget token L0 wakeup kernel with project-first quota & ambient-prompt deduplication."""
     raw_active = db.list_nodes(scope=project, as_of=None)
-    # Exclude low-priority P2 trivia, graduated mechanical guards, non-P0 code exemplars, and broken-ref cards from L0 wakeup kernel
+    # Exclude low-priority P2 trivia, global P1 on-demand preferences (0t L0 contract),
+    # graduated mechanical guards, non-P0 code exemplars, and broken-ref cards from L0 wakeup kernel
     active = [
         n
         for n in raw_active
         if (n.severity != "P2" or n.type == "principle")
+        and not (n.scope == "global" and n.severity != "P0")
         and not n.graduated
         and not (n.compat.get("pattern") == "code_exemplar" and n.severity != "P0")
         and check_source_freshness(n.source_ref, n.source_hash) != "broken_ref"
@@ -692,10 +694,10 @@ def query_snapshot_mirror(
 
         has_prohibition = any(w in rule_text.lower() for w in _NEGATION_WORDS)
 
-        # 1. Conflict / Redline check: catches BOTH P0/principles AND repo-scoped P1/P2 prohibitions,
+        # 1. Conflict / Redline check: catches BOTH P0 redlines AND repo-scoped P1/P2 prohibitions,
         # requiring at least one discriminative topic term (or strong top-rank score) to avoid domain-noun noise.
         is_prohibition_hit = has_prohibition and (len(specific_overlap) >= 1 or score >= 0.70 * top_score)
-        is_principle_hit = (ntype == "principle" or card["severity"] == "P0") and (
+        is_principle_hit = card["severity"] == "P0" and (
             len(specific_overlap) >= 2 or score >= 0.70 * top_score
         )
         if is_prohibition_hit or is_principle_hit:

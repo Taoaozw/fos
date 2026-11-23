@@ -180,3 +180,88 @@ def test_cli_correct_and_archive_aliases(tmp_path: Path, capsys: pytest.CaptureF
     assert run_cli(["--home", home, "arc", new_id, "--reason", "已固化为单测", "--json"]) == int(ExitCode.OK)
     arc_data = json.loads(capsys.readouterr().out)
     assert arc_data["archived"] == new_id
+
+
+def test_sleep_reflection_demotes_misplaced_global_p0_and_protects_pinned(tmp_path: Path) -> None:
+    class _DemoteReflector:
+        @property
+        def model_name(self) -> str:
+            return "mock:demote-reflector"
+
+        def complete_json(self, prompt: str, *, system: str = "") -> dict | None:
+            if "Review these active FlowOS memory cards" in prompt:
+                return {
+                    "actions": [
+                        {
+                            "action": "demote",
+                            "target_id": "PRN-001",
+                            "new_scope": "fos",
+                            "new_severity": "P1",
+                            "reason": "fos-specific source_ref design rule, not universal global P0",
+                        },
+                        {
+                            "action": "demote",
+                            "target_id": "PRN-002",
+                            "new_scope": "fos",
+                            "new_severity": "P2",
+                            "reason": "should be blocked because pinned",
+                        },
+                    ]
+                }
+            # Pass through automated hindsight atoms during distill stage
+            if "[" in prompt:
+                batch = json.loads(prompt[prompt.index("[") :])
+                return {
+                    "items": [
+                        {
+                            "id": entry["id"],
+                            "keep": True,
+                            "kind": "principle",
+                            "scope": "global",
+                            "severity": "P0",
+                            "rule": entry["raw"],
+                            "rationale": "r",
+                            "trigger_when": ["t"],
+                        }
+                        for entry in batch
+                    ]
+                }
+            return None
+
+        def unload(self) -> None:
+            return
+
+    providers = ProviderBundle(embedder=LocalHashEmbedder(), reranker=LexicalReranker(), reasoner=_DemoteReflector())
+    engine = BrainEngine(tmp_path / "brain", providers=providers)
+
+    # Automated hindsight global P0 (not manually pinned) -> CAN be demoted by sleep reflection
+    p1 = engine.add_atom(
+        kind="principle",
+        scope="global",
+        source="hindsight:antigravity:s1",
+        content="长期记忆只保留可执行约束并用 source_ref 指向原文。",
+        meta={"severity": "P0"},
+    )["node"]["id"]
+    # Manually curated & pinned P0 -> MUST survive reflection untouched
+    p2 = engine.add_atom(
+        kind="principle",
+        scope="global",
+        source="manual",
+        content="采用最小局部改动，禁止修改无关模块。",
+        meta={"severity": "P0"},
+    )["node"]["id"]
+    pin_node_in_engine(engine, p2)
+
+    res = run_dream(engine, no_gate=True)
+    assert res["promoted"] is True
+    assert res["stats"]["reflect_demoted"] == 1
+
+    demoted = engine.get(p1)["node"]
+    assert demoted["scope"] == "fos"
+    assert demoted["severity"] == "P1"
+    assert demoted["type"] == "decision"
+
+    kept = engine.get(p2)["node"]
+    assert kept["scope"] == "global"
+    assert kept["severity"] == "P0"
+    assert kept["type"] == "principle"

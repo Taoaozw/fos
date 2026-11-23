@@ -49,15 +49,16 @@ DEFAULT_TTL_P1_DAYS = 180
 _REFLECT_SYSTEM_PROMPT = """You are FlowOS's Sleep-Time Self-Correction & Pruning Auditor.
 Review the currently active compiled memory cards and emit ONLY high-confidence maintenance actions:
 1. `supersede`: when two active cards contradict each other, OR a newer/clearer card strictly subsumes an older/redundant card. Specify `winner_id` and `loser_id`.
-2. `archive`: ONLY when a card is clearly obsolete, self-contradicted, or pure leftover noise that fails the 6-month half-life test.
+2. `archive`: ONLY when a card is clearly obsolete, self-contradicted, pure leftover ops noise, or low-value generic agent etiquette that fails the 6-month half-life test.
+3. `demote`: when a `global` or `P0` card is actually a repo-specific design rule or narrow tech-stack/domain preference rather than an unconditional cross-repo redline. Specify `target_id`, `new_scope` (`global` or `<repo>`), and `new_severity` (`P1` or `P2`).
 
 Rules:
-- Be conservative: if all cards are clean, distinct, and still valid, return `{"actions": []}`.
+- Be conservative: if all cards are clean, distinct, properly scoped, and still valid, return `{"actions": []}`.
 - Never invent new IDs; only reference IDs present in the input list.
-- Never archive a core P0 principle unless it is strictly superseded by a newer P0 principle.
+- Never archive a core universal P0 principle unless it is strictly superseded by a newer P0 principle.
 
 Return STRICT JSON:
-{"actions": [{"action": "supersede", "winner_id": "...", "loser_id": "...", "reason": "..."}, {"action": "archive", "target_id": "...", "reason": "..."}]}"""
+{"actions": [{"action": "supersede", "winner_id": "...", "loser_id": "...", "reason": "..."}, {"action": "archive", "target_id": "...", "reason": "..."}, {"action": "demote", "target_id": "...", "new_scope": "...", "new_severity": "P1|P2", "reason": "..."}]}"""
 
 _DISTILL_SYSTEM_PROMPT = """You are FlowOS's First-Principles Cognitive Distiller (modeled on fops LESSONS.md + Songe + Hindsight).
 Apply the STRICT **6-Month Half-Life Test**: "Will this knowledge still prevent a real engineering mistake or steer a real design decision 6 months from now?"
@@ -310,8 +311,8 @@ def _reflect_active_nodes(
     *,
     pinned_ids: set[str],
 ) -> dict[str, int]:
-    """Sleep-time LLM reflection pass: detect contradictions, subsumed duplicates, and obsolete nodes."""
-    rstats = {"reflect_superseded": 0, "reflect_archived": 0, "reflect_cache_hit": 0}
+    """Sleep-time LLM reflection pass: detect contradictions, subsumed duplicates, scope misplacements, and obsolete nodes."""
+    rstats = {"reflect_superseded": 0, "reflect_archived": 0, "reflect_demoted": 0, "reflect_cache_hit": 0}
     if reasoner.model_name == "heuristic":
         return rstats
 
@@ -400,6 +401,32 @@ def _reflect_active_nodes(
                 else f"[reflect-archived: {reason}]"
             )
             rstats["reflect_archived"] += 1
+
+        elif kind == "demote":
+            tid = str(act.get("target_id") or "")
+            if not tid or tid in pinned_ids or tid not in nodes_by_id:
+                continue
+            target = nodes_by_id[tid]
+            if target.status != "active":
+                continue
+            new_scope = str(act.get("new_scope") or target.scope).strip().lower() or target.scope
+            new_sev = str(act.get("new_severity") or "P1").strip().upper()
+            if new_sev not in ("P1", "P2"):
+                new_sev = "P1"
+            if new_scope == target.scope and new_sev == target.severity:
+                continue
+            target.scope = new_scope
+            target.severity = new_sev
+            if target.type == "principle" and new_scope != "global":
+                target.type = "decision"
+            target.l0 = build_l0_line(target)
+            target.updated_at = ts_now
+            target.rationale = (
+                f"{target.rationale} [reflect-demoted: {reason}]".strip()
+                if target.rationale
+                else f"[reflect-demoted: {reason}]"
+            )
+            rstats["reflect_demoted"] += 1
 
     return rstats
 

@@ -264,23 +264,33 @@ def _find_prev_context(turns: list[_Turn], idx: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _filter_owned_repos(base: Path) -> list[Path]:
+    """Reuse proposals.discover_owned_repos when scanning a multi-repo workspace root to skip 3rd-party clones."""
+    from fos.proposals import _current_git_identity, discover_owned_repos
+
+    owner_email, owner_name = _current_git_identity()
+    if owner_email or owner_name:
+        return discover_owned_repos(base)
+    return sorted(p.parent for p in base.glob("*/.git") if p.parent.is_dir())
+
+
 def _discover_git_repos(root_dir: Path | None) -> list[Path]:
     if root_dir is not None:
         base = Path(root_dir).expanduser().resolve()
         if (base / ".git").exists():
             return [base]
         if base.is_dir():
-            return sorted(p.parent for p in base.glob("*/.git") if p.parent.is_dir())
+            return _filter_owned_repos(base)
         return []
 
-    # Default: current git repo if inside one, else scan ~/project/clive (or ~/project)
+    # Default: current git repo if inside one, else scan owned repos under ~/project/clive (or ~/project)
     cwd = Path.cwd().resolve()
     for cand in (cwd, *cwd.parents):
         if (cand / ".git").exists():
             return [cand]
     for fallback in (Path.home() / "project" / "clive", Path.home() / "projects" / "clive"):
         if fallback.is_dir():
-            repos = sorted(p.parent for p in fallback.glob("*/.git") if p.parent.is_dir())
+            repos = _filter_owned_repos(fallback)
             if repos:
                 return repos
     return []

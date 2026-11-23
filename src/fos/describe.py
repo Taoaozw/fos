@@ -324,6 +324,27 @@ COMMAND_SPECS: list[dict[str, Any]] = [
             "fos pattern list --json",
         ],
     },
+    {
+        "name": "audit",
+        "aliases": ["au"],
+        "readOnly": False,
+        "summary": "Verify active repository memories against live codebase via read-only coding agent (codex exec) and enqueue drift/obsolete proposals",
+        "usage": "fos audit [--scope REPO] [--repo PATH] [--model MODEL] [--effort low|medium|high|xhigh] [--dry-run] [--json]",
+        "flags": [
+            {"name": "--scope", "type": "string", "desc": "repository scope to audit (auto-detected from cwd)"},
+            {"name": "--repo", "type": "string", "desc": "explicit local repository path"},
+            {"name": "--model", "type": "string", "desc": "override codex model (e.g. gpt-6.2-sol)"},
+            {"name": "--effort", "type": "string", "desc": "reasoning effort: low|medium|high|xhigh"},
+            {"name": "--cli-cmd", "type": "string", "desc": "override CLI agent command"},
+            {"name": "--dry-run", "type": "bool", "default": "false", "desc": "report verdicts without creating proposals or updating verified_at"},
+            {"name": "--timeout", "type": "int", "default": "240", "desc": "audit subprocess timeout in seconds"},
+            {"name": "--json", "type": "bool", "default": "false", "desc": "JSON output"},
+        ],
+        "examples": [
+            "fos audit --scope fos --model gpt-6.2-sol --effort medium --dry-run",
+            "fos audit --scope flowxy-gateway --model gpt-6.2-sol --effort medium --json",
+        ],
+    },
 ]
 
 

@@ -266,3 +266,36 @@ def test_antigravity_scope_inference_and_non_redline_first_principles_demotion(t
         assert ev["scope"] == "fos"
         assert ev["kind"] != "principle"
         assert ev["meta"]["severity"] != "P0"
+
+
+def test_ingest_multi_repo_workspace_skips_third_party_clones(tmp_path: Path, monkeypatch) -> None:
+    import subprocess
+
+    monkeypatch.setattr("fos.proposals._current_git_identity", lambda: ("dev@example.com", "mydev"))
+
+    def _mk_repo(path: Path, author: str, email: str, doc_text: str) -> None:
+        path.mkdir(parents=True)
+        subprocess.run(["git", "-C", str(path), "init", "-q"], check=True)
+        subprocess.run(["git", "-C", str(path), "config", "user.name", author], check=True)
+        subprocess.run(["git", "-C", str(path), "config", "user.email", email], check=True)
+        (path / "AGENTS.md").write_text(doc_text, encoding="utf-8")
+        subprocess.run(["git", "-C", str(path), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", "init"], check=True)
+
+    _mk_repo(
+        tmp_path / "my-app",
+        "mydev",
+        "dev@example.com",
+        "## Core Boundary\nAll API handlers MUST return typed enumerable error codes and never leak stack traces.\n",
+    )
+    _mk_repo(
+        tmp_path / "third-party-litellm",
+        "upstream-oss",
+        "oss@litellm.ai",
+        "## Proxy Rules\nThird party upstream instructions that should never enter personal memory.\n",
+    )
+
+    events = collect_hindsight_events("docs", root_dir=tmp_path, cursor_path=tmp_path / "c.json", limit=20)
+    scopes = {e["scope"] for e in events}
+    assert "my-app" in scopes
+    assert "third-party-litellm" not in scopes

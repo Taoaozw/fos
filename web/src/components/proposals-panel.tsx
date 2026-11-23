@@ -61,6 +61,7 @@ const KIND_META: Record<
   promote_global: { label: "晋升全局", icon: IconSparkles },
   merge_dedup: { label: "合并瘦身", icon: IconGitMerge },
   retire_stale: { label: "建议归档", icon: IconArchive },
+  fix_drifted: { label: "巡检修正", icon: IconEdit },
 }
 
 const STATUS_LABEL: Record<string, string> = {

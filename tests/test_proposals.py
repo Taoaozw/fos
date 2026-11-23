@@ -86,8 +86,23 @@ def test_owned_repo_discovery_excludes_third_party_and_scans_manifests(tmp_path:
     assert res["owned_repos"] == ["repo-a", "repo-b"]
     assert "React" in res["recurring_stack_tags"]
     assert "shadcn Base UI" in res["recurring_stack_tags"]
-    assert res["created"] >= 1
-    assert any(p["kind"] == "promote_global" and p["proposed_severity"] == "P1" for p in res["new_proposals"])
+    # Bare manifest stack overlap alone MUST NOT generate noisy stack-selection promote_global proposals
+    assert res["created"] == 0
+
+    # Once >=2 repos have real recurring enforceable constraint nodes, promote_global P1 IS proposed
+    engine.add_atom(
+        kind="decision",
+        scope="repo-a",
+        content="应用页面交互控件必须复用 components/ui 共享组件，禁止直接手写原生控件。",
+    )
+    engine.add_atom(
+        kind="decision",
+        scope="repo-b",
+        content="应用页面交互控件必须复用 components/ui 共享组件，禁止手写原生控件。",
+    )
+    res2 = scan_proposals(engine, root_dir=tmp_path, force=True)
+    assert res2["created"] >= 1
+    assert any(p["kind"] == "promote_global" and p["proposed_severity"] == "P1" for p in res2["new_proposals"])
 
 
 def test_proposal_lifecycle_accept_merge_cooldown_and_rebuild(tmp_path: Path) -> None:
@@ -267,3 +282,63 @@ def test_l0_budget_guard_and_http_cli_proposals(tmp_path: Path, capsys: pytest.C
     payload = json.loads(capsys.readouterr().out)
     assert payload["proposal"]["proposed_severity"] == "P1"
     assert payload["result_node_id"] is not None
+
+
+def test_proposals_blocks_manifest_only_and_rephrased_dismissed(tmp_path: Path) -> None:
+    engine = BrainEngine(tmp_path / "brain")
+    d1 = engine.add_atom(kind="decision", scope="fops", content="单机 Go 工具嵌入式存储优先使用无 CGO 的 modernc.org/sqlite。")["node"]["id"]
+    d2 = engine.add_atom(kind="decision", scope="ssh-center", content="Go 单机工具需要关系库时使用无 CGO 的 modernc.org/sqlite。")["node"]["id"]
+
+    # 1. Bare manifest-only proposal (target_node_ids=[]) MUST be rejected by hard invariant
+    fake_stack = _FakeProposalReasoner(
+        [
+            {
+                "kind": "promote_global",
+                "topic_key": "frontend-default-stack",
+                "title": "前端默认栈",
+                "proposed_type": "decision",
+                "proposed_severity": "P1",
+                "proposed_rule": "新建管理端默认使用 React、TypeScript、Vite、Bun、Tailwind CSS v4。",
+                "evidence_repos": ["fops", "ssh-center", "fos"],
+                "target_node_ids": [],
+                "confidence": 0.95,
+            },
+            {
+                "kind": "promote_global",
+                "topic_key": "go-pure-sqlite",
+                "title": "本地 Go 工具优先用纯 Go SQLite",
+                "proposed_type": "decision",
+                "proposed_severity": "P1",
+                "proposed_rule": "单机 Go 工具需要嵌入式关系数据库时默认使用无 CGO 的 modernc.org/sqlite。",
+                "proposed_trigger_when": ["Go 工具", "SQLite", "modernc"],
+                "evidence_repos": ["fops", "ssh-center"],
+                "target_node_ids": [d1, d2],
+                "confidence": 0.9,
+            },
+        ]
+    )
+    scan1 = scan_proposals(engine, root_dir=tmp_path / "none", reasoner=fake_stack)
+    assert scan1["created"] == 1
+    pid = scan1["new_proposals"][0]["id"]
+
+    # 2. Dismiss it, then have LLM rephrase title & invent a brand-new topic_key with same repos
+    dismiss_proposal(engine, pid, reason="不需要全局技术栈选型")
+    fake_rephrased = _FakeProposalReasoner(
+        [
+            {
+                "kind": "promote_global",
+                "topic_key": "local-cli-default-golang-sqlite",
+                "title": "本地工具默认采用 Go 与 SQLite",
+                "proposed_type": "decision",
+                "proposed_severity": "P1",
+                "proposed_rule": "单用户单机 Go 工具需要嵌入式关系库时默认使用无 CGO 的 modernc.org/sqlite。",
+                "proposed_trigger_when": ["本地工具", "Go", "SQLite"],
+                "evidence_repos": ["fops", "ssh-center"],
+                "target_node_ids": [d1, d2],
+                "confidence": 0.9,
+            }
+        ]
+    )
+    scan2 = scan_proposals(engine, root_dir=tmp_path / "none", reasoner=fake_rephrased, force=True)
+    assert scan2["created"] == 0
+    assert scan2["skipped_cooldown"] == 1

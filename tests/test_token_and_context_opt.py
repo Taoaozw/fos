@@ -183,3 +183,36 @@ def test_split_rule_overflow_preservation_and_en_stemming() -> None:
     rule, rationale = split_rule_and_rationale(long_doc)
     assert estimate_tokens(rule) <= 84
     assert len(rationale) > 10
+
+
+def test_global_p1_zero_l0_contract_and_on_demand_recall(tmp_path: Path) -> None:
+    engine = BrainEngine(tmp_path / "brain")
+    p0_id = engine.add_atom(
+        kind="principle",
+        scope="global",
+        content="采用最小局部改动，禁止修改无关模块。",
+        meta={"severity": "P0"},
+    )["node"]["id"]
+    g_p1_id = engine.add_atom(
+        kind="decision",
+        scope="global",
+        content="新建前端管理端采用 shadcn 共享组件与语义主题 Token。",
+        meta={"severity": "P1", "trigger_when": ["新建前端", "shadcn UI", "共享组件"]},
+    )["node"]["id"]
+    repo_p1_id = engine.add_atom(
+        kind="lesson",
+        scope="backend-go",
+        content="Go 服务禁止在热路径频繁分配临时 buffer。",
+        meta={"severity": "P1"},
+    )["node"]["id"]
+
+    # Boot in an unrelated backend repo MUST include repo P1 + global P0, NEVER global P1 (0t L0 contract)
+    boot = engine.boot(project="backend-go", budget=300)
+    boot_ids = {e["id"] for e in boot["entries"]}
+    assert p0_id in boot_ids
+    assert repo_p1_id in boot_ids
+    assert g_p1_id not in boot_ids
+
+    # Global P1 IS still recalled on demand when the query actually matches its trigger/domain
+    rec = engine.recall("新建前端管理端 shadcn 共享组件", scope="backend-go", budget=800)
+    assert any(r["id"] == g_p1_id for r in rec["results"])

@@ -154,6 +154,26 @@ def _print_result(data: Any, *, as_json: bool, command: str, fields: str | None 
             print(f"fos is up to date: {data.get('local_version')}{note}")
         return
 
+    if command == "audit" and "findings" in data:
+        sm = data.get("summary") or {}
+        print(
+            f"Codebase Audit (scope={data.get('scope')}, repo={data.get('repo_path')}, "
+            f"audited={data.get('audited_count', 0)}/{data.get('total_repo_nodes', 0)}, dry_run={data.get('dry_run')})"
+        )
+        print(
+            f"  Summary: verified={sm.get('verified', 0)}, drifted={sm.get('drifted', 0)}, "
+            f"reclassify={sm.get('reclassify', 0)}, obsolete={sm.get('obsolete', 0)}, misscoped={sm.get('misscoped', 0)} | "
+            f"proposals_created={len(data.get('created_proposals') or [])}, verified_refreshed={data.get('verified_refreshed', 0)}"
+        )
+        for f in data.get("findings") or []:
+            tag = str(f.get("verdict", "")).upper()
+            print(f"  - [{tag}|{f.get('id')}|{f.get('severity')}] {f.get('reason', '')}")
+            if f.get("evidence"):
+                print(f"      evidence: {f['evidence']}")
+            if f.get("suggested_rule"):
+                print(f"      suggested: {f['suggested_rule']}")
+        return
+
     if command == "pattern" and "patterns" in data:
         print(f"Code Patterns (snap={data.get('snapshot_version')}, count={data.get('count', 0)})")
         for it in data.get("patterns") or []:
@@ -379,6 +399,27 @@ def build_parser() -> _StrictArgumentParser:
     p_pat.add_argument("--trigger", action="append", default=None, help="Repeatable trigger_when phrase")
     p_pat.add_argument("--max-lines", dest="max_lines", type=int, default=45, help="Max skeleton lines stored in L2 ledger")
     p_pat.add_argument("--json", action="store_true")
+
+    # audit (codebase-grounded read-only memory verification)
+    p_audit = sub.add_parser(
+        "audit",
+        aliases=["au"],
+        help="Verify active repository memories against live source code via read-only coding agent (codex exec)",
+    )
+    p_audit.add_argument("--scope", type=str, default=None, help="Repository scope to audit (auto-detected from cwd)")
+    p_audit.add_argument("--repo", type=str, default=None, help="Explicit local repository path")
+    p_audit.add_argument("--model", type=str, default=None, help="Override coding agent model (e.g. gpt-6.2-sol)")
+    p_audit.add_argument(
+        "--effort",
+        type=str,
+        default=None,
+        choices=["low", "medium", "high", "xhigh"],
+        help="Reasoning effort for codex exec",
+    )
+    p_audit.add_argument("--cli-cmd", type=str, default=None, help="Override CLI agent command (default from config)")
+    p_audit.add_argument("--dry-run", action="store_true", help="Report findings only without writing proposals or timestamps")
+    p_audit.add_argument("--timeout", type=int, default=240, help="Subprocess timeout in seconds")
+    p_audit.add_argument("--json", action="store_true")
 
     return parser
 
@@ -617,6 +658,20 @@ def run_cli(argv: list[str] | None = None) -> int:
         elif cmd == "feedback":
             verdict = "useful" if args.useful else "noise"
             result = client.feedback(args.node_id, verdict, context=args.context)
+        elif cmd == "audit":
+            scope = args.scope or _detect_git_project()
+            if not scope:
+                raise UsageError("Specify `--scope <repo>` or run `fos audit` inside a git repository.")
+            rpath = Path(args.repo).expanduser().resolve() if args.repo else None
+            result = client.audit(
+                scope=scope,
+                repo_path=rpath,
+                cli_command=args.cli_cmd,
+                model=args.model,
+                effort=args.effort,
+                dry_run=args.dry_run,
+                timeout_s=args.timeout,
+            )
         elif cmd == "pattern":
             from fos.code_pattern import detect_repo_stack_versions, parse_stack_param
 

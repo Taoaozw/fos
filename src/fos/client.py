@@ -832,6 +832,31 @@ class FosClient:
             timeout=120.0,
         )
 
+    def audit(
+        self,
+        *,
+        scope: str,
+        repo_path: Path | None = None,
+        cli_command: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        dry_run: bool = False,
+        timeout_s: int = 240,
+    ) -> dict[str, Any]:
+        from fos.audit import audit_repo_memories
+
+        cmd = cli_command or self.cfg.providers.cli_command or "codex exec"
+        return audit_repo_memories(
+            self._engine(),
+            scope=scope,
+            repo_path=repo_path,
+            cli_command=cmd,
+            model=model,
+            effort=effort,
+            dry_run=dry_run,
+            timeout_s=timeout_s,
+        )
+
     def accept_proposal(
         self,
         proposal_id: str,

@@ -429,7 +429,7 @@ class MLXReasoner:
 class CLISubprocessReasoner:
     """Non-interactive CLI provider adapter (`codex exec` / `claude -p` / `agy -p`)."""
 
-    def __init__(self, command: str = "codex exec", timeout_s: int = 90) -> None:
+    def __init__(self, command: str = "codex exec", timeout_s: int = 180) -> None:
         self._command = command
         self._timeout_s = timeout_s
 
